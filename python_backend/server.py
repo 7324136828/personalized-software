@@ -213,6 +213,13 @@ class LearningRequestHandler(SimpleHTTPRequestHandler):
     """HTTP handler for API requests plus the built React application."""
 
     server_version = "LearningContentBackend/1.0"
+    # Keep connections alive so the browser can reuse a small pool of sockets
+    # instead of opening (and having the server tear down) one per request. The
+    # React views fetch every document of a kind in parallel; under HTTP/1.0 the
+    # per-response socket close races with those bursts and surfaces in the app
+    # as "Failed to fetch". Every response below sends an accurate
+    # Content-Length, which is what makes HTTP/1.1 keep-alive safe here.
+    protocol_version = "HTTP/1.1"
 
     def __init__(
         self,
@@ -321,8 +328,18 @@ class LearningRequestHandler(SimpleHTTPRequestHandler):
         path = safe_child(self.output_dir / kind, file_name)
         if not path.is_file():
             raise FileNotFoundError(relative)
-        body = path.read_bytes()
-        content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        try:
+            body = path.read_bytes()
+        except OSError as error:
+            # A transient read failure (for example the file briefly locked by an
+            # editor on Windows) must still produce a proper HTTP response rather
+            # than an aborted connection, which the app would report as a network
+            # "Failed to fetch" error.
+            raise FileNotFoundError(relative) from error
+        if path.suffix == ".json":
+            content_type = "application/json"
+        else:
+            content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         if content_type.startswith("text/") or content_type in {"application/json", "image/svg+xml"}:
             content_type += "; charset=utf-8"
         self.send_response(HTTPStatus.OK)
