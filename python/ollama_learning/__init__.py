@@ -8,11 +8,12 @@ from .claude_client_impl import ClaudeClientImpl
 from .rag_system import RAGSystem, DocumentChunk
 from .schemas import (
     PodcastOutline, Presentation, MindMap, Report,
-    FlashcardSet, Quiz, DataTable
+    FlashcardSet, Quiz, QASet, QAPrompt, DataTable
 )
 from .reports import ReportGenerator
 from .flashcards import FlashcardGenerator, FlashcardViewer
 from .quiz import QuizGenerator, QuizViewer
+from .qanda import QAGenerator
 from .mindmap import MindMapGenerator
 from .slides import SlideGenerator, SlideViewer
 from .audio import AudioGenerator
@@ -33,12 +34,15 @@ __all__ = [
     "Report",
     "FlashcardSet",
     "Quiz",
+    "QASet",
+    "QAPrompt",
     "DataTable",
     "ReportGenerator",
     "FlashcardGenerator",
     "FlashcardViewer",
     "QuizGenerator",
     "QuizViewer",
+    "QAGenerator",
     "MindMapGenerator",
     "SlideGenerator",
     "SlideViewer",

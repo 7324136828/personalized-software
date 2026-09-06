@@ -136,6 +136,22 @@ class Quiz(BaseModel):
     questions: List[QuizQuestion] = Field(..., description="All questions")
 
 
+# Free-text Q&A Schemas
+class QAPrompt(BaseModel):
+    """A prompt answered by the learner in their own words."""
+    id: str = Field(..., description="Stable question identifier")
+    question: str = Field(..., description="Question shown to the learner")
+    placeholder: str = Field("Type your response…", description="Optional response hint")
+    required: bool = Field(False, description="Whether an answer is required before completion")
+
+
+class QASet(BaseModel):
+    """A complete free-text Q&A set."""
+    title: str = Field(..., description="Q&A set title")
+    description: str = Field(..., description="Q&A set description")
+    questions: List[QAPrompt] = Field(..., description="Open-ended prompts")
+
+
 # Data Table Schemas
 class StudyField(BaseModel):
     """Definition of a field to extract."""

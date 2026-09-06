@@ -1,20 +1,20 @@
 # Multi-LLM Learning System
 
-A comprehensive AI learning system that supports multiple LLM providers (Ollama, OpenAI, Claude) to generate educational content from documents. Features include reports, flashcards, quizzes, mind maps, slide decks, audio podcasts, data table extraction, and advanced coding assistance with Codex and Claude Code.
+A comprehensive AI learning system that supports multiple LLM providers (Ollama, OpenAI, Claude) to generate educational content from documents. Features include reports, flashcards, quizzes, free-text Q&A, mind maps, slide decks, audio podcasts, data table extraction, and advanced coding assistance with Codex and Claude Code.
 
 ## Quick Start (React viewers)
 
-A batch script at the repository root builds the React viewers, syncs the
-generated content, and hosts everything:
+A batch script at the repository root builds the React viewers and starts a
+local Python backend that serves generated content directly from `output/`:
 
 ```bat
 run.bat
 ```
 
-It installs dependencies on first run, copies `output/` into the app, builds for
-production, serves on http://localhost:4173, and opens the infographics. Use
-`run.bat dev` for hot reload, `run.bat build` to build without serving, or
-`run.bat help` for all options. See `react/README.md` for details.
+It installs dependencies on first run, builds for production, serves on
+http://localhost:4173, and opens the Q&A view. Use `run.bat dev` for hot reload,
+`run.bat build` to build without serving, or `run.bat help` for all options.
+No `npm run sync` step is needed. See `react/README.md` for details.
 
 ## Features
 
@@ -22,6 +22,7 @@ production, serves on http://localhost:4173, and opens the infographics. Use
 - **Reports**: Generate comprehensive reports with citations
 - **Flashcards**: Interactive flashcard system with GUI viewer
 - **Quizzes**: Multiple-choice quizzes with interactive testing
+- **Free-text Q&A**: Prompted written responses with temporary autosave and JSON download
 - **Mind Maps**: Hierarchical concept maps
 - **Slide Decks**: Presentation slides with GUI viewer
 - **Audio Overviews**: Podcast-style audio generation with Kokoro TTS
@@ -241,6 +242,30 @@ python python/ollama_learning/quiz.py \
   --interactive \
   --provider ollama \
   --model qwen2.5
+```
+
+### Free-text Q&A
+
+Generate open-ended prompts that learners answer in their own words:
+
+```bash
+python -m python.ollama_learning.qanda \
+  --input input/dataset1 \
+  --topic "reflection and application" \
+  --output output/qandas/reflection.json \
+  --count 8 \
+  --provider ollama \
+  --model qwen2.5
+```
+
+Start `run.bat dev`, open the **Q&A** tab, and select the generated set.
+Responses autosave to the Python backend's temporary directory and can be
+downloaded as JSON during or after the session.
+
+The matching desktop launcher reads and writes the same Q&A/session formats:
+
+```bash
+python python/qanda_launcher.py --qanda-dir output/qandas
 ```
 
 ### Mind Maps

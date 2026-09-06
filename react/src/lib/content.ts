@@ -45,15 +45,16 @@ export interface LoadResult<T> {
 }
 
 export function dataUrl(kind: Kind, file: string): string {
-  return `${import.meta.env.BASE_URL}data/${kind}/${file}`;
+  const encoded = file.split("/").map(encodeURIComponent).join("/");
+  return `${import.meta.env.BASE_URL}api/content/${kind}/${encoded}`;
 }
 
 export async function fetchManifest(): Promise<Manifest> {
-  const response = await fetch(`${import.meta.env.BASE_URL}data/manifest.json`);
+  const response = await fetch(`${import.meta.env.BASE_URL}api/content/manifest`);
   if (!response.ok) {
     throw new Error(
       `Could not load the content manifest (${response.status}). ` +
-        `Run "npm run sync" to stage ../output into public/data.`,
+        `Make sure the Python backend is running.`,
     );
   }
   return (await response.json()) as Manifest;

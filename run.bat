@@ -2,13 +2,12 @@
 setlocal enabledelayedexpansion
 
 rem ---------------------------------------------------------------------------
-rem  run.bat - build the React viewers, sync generated content, and host them.
+rem  run.bat - build the React viewers and host them with the Python backend.
 rem
 rem  Usage:
-rem    run.bat            Sync, build, then serve and open the infographics
-rem    run.bat dev        Sync, then start the dev server with hot reload
-rem    run.bat build      Sync and build only, no server
-rem    run.bat sync       Copy ../output into react/public/data only
+rem    run.bat            Build, then serve the app and live output data
+rem    run.bat dev        Start the backend and Vite with hot reload
+rem    run.bat build      Build only, no server
 rem    run.bat help       Show this message
 rem
 rem  Options (before or after the command):
@@ -26,7 +25,6 @@ set "OPEN=1"
 if "%~1"=="" goto parsed
 if /i "%~1"=="dev"       set "COMMAND=dev"      & shift & goto parse
 if /i "%~1"=="build"     set "COMMAND=build"    & shift & goto parse
-if /i "%~1"=="sync"      set "COMMAND=sync"     & shift & goto parse
 if /i "%~1"=="serve"     set "COMMAND=serve"    & shift & goto parse
 if /i "%~1"=="help"      goto usage
 if /i "%~1"=="--help"    goto usage
@@ -63,6 +61,19 @@ if errorlevel 1 (
     goto fail
 )
 
+if /i not "%COMMAND%"=="build" (
+    set "PYTHON=python"
+    where python >nul 2>&1
+    if errorlevel 1 (
+        where py >nul 2>&1
+        if errorlevel 1 (
+            echo [run] ERROR: Python was not found on PATH.
+            goto fail
+        )
+        set "PYTHON=py -3"
+    )
+)
+
 for /f "delims=" %%v in ('node --version') do set "NODEVER=%%v"
 echo [run] Node %NODEVER%
 
@@ -92,37 +103,23 @@ if not exist "node_modules" (
     echo.
 )
 
-rem -- step 1: sync -----------------------------------------------------------
-
-echo [run] Step 1/3  Syncing generated content into public\data ...
-call npm run sync
-if errorlevel 1 (
-    echo [run] ERROR: sync failed.
-    goto popfail
-)
-echo.
-
-if /i "%COMMAND%"=="sync" (
-    echo [run] Sync complete.
-    goto popdone
-)
-
 rem -- dev server takes over here ---------------------------------------------
 
 if /i "%COMMAND%"=="dev" (
-    echo [run] Starting the dev server on port %PORT% ...
-    if "%OPEN%"=="1" start "" "http://localhost:%PORT%/#/infographics"
-    echo [run] Press Ctrl+C to stop.
+    echo [run] Starting the backend and dev server on port %PORT% ...
     echo.
-    call npm run dev -- --port %PORT%
+    if "%OPEN%"=="1" (
+        call %PYTHON% "%ROOT%python_backend\server.py" --dev --frontend-port %PORT% --open
+    ) else (
+        call %PYTHON% "%ROOT%python_backend\server.py" --dev --frontend-port %PORT%
+    )
     goto popdone
 )
 
-rem -- step 2: build ----------------------------------------------------------
+rem -- build ------------------------------------------------------------------
 
-rem build:only skips the prebuild sync hook, since step 1 already synced.
-echo [run] Step 2/3  Building for production ...
-call npm run build:only
+echo [run] Building for production ...
+call npm run build
 if errorlevel 1 (
     echo [run] ERROR: build failed.
     goto popfail
@@ -139,28 +136,23 @@ if /i "%COMMAND%"=="build" (
     goto popdone
 )
 
-rem -- step 3: host -----------------------------------------------------------
+rem -- host -------------------------------------------------------------------
 
-echo [run] Step 3/3  Hosting on port %PORT% ...
+echo [run] Hosting the app and live output data on port %PORT% ...
 echo.
-echo   Infographics    http://localhost:%PORT%/#/infographics
+echo   Q^&A             http://localhost:%PORT%/#/qanda
 echo   All viewers     http://localhost:%PORT%/
-echo.
-echo   Standalone exports served from the same origin:
-for %%F in ("dist\data\infographics\*.html") do (
-    echo     http://localhost:%PORT%/data/infographics/%%~nxF
-)
-for %%F in ("dist\data\infographics\*.svg") do (
-    echo     http://localhost:%PORT%/data/infographics/%%~nxF
-)
 echo.
 echo [run] Press Ctrl+C to stop the server.
 echo.
 
-if "%OPEN%"=="1" start "" "http://localhost:%PORT%/#/infographics"
-call npm run preview -- --port %PORT% --strictPort
+if "%OPEN%"=="1" (
+    call %PYTHON% "%ROOT%python_backend\server.py" --port %PORT% --open
+) else (
+    call %PYTHON% "%ROOT%python_backend\server.py" --port %PORT%
+)
 if errorlevel 1 (
-    echo [run] ERROR: preview server exited with an error.
+    echo [run] ERROR: backend server exited with an error.
     echo [run] If the port is in use, retry with:  run.bat --port 4174
     goto popfail
 )
@@ -184,12 +176,11 @@ exit /b 1
 
 :printusage
 echo.
-echo Usage: run.bat [dev^|build^|sync^|serve] [--port N] [--no-open]
+echo Usage: run.bat [dev^|build^|serve] [--port N] [--no-open]
 echo.
-echo   (no args)   Sync, build, then host and open the infographics
-echo   dev         Sync, then run the dev server with hot reload
-echo   build       Sync and build only
-echo   sync        Copy output\ into react\public\data only
+echo   (no args)   Build, then host the app and live output data
+echo   dev         Run the Python API and Vite with hot reload
+echo   build       Build only
 echo.
 echo   --port N    Port to serve on (default 4173 serve, 5174 dev)
 echo   --no-open   Do not launch a browser

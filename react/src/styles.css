@@ -132,10 +132,11 @@ button.link.active { font-weight: 700; }
 
 label.field { display: inline-flex; align-items: center; gap: 6px; font-size: 0.84rem; color: var(--muted); }
 label.check { display: inline-flex; align-items: center; gap: 6px; font-size: 0.84rem; }
-input, select {
+input, select, textarea {
   padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px;
   background: var(--card); color: var(--ink); font: inherit; font-size: 0.86rem;
 }
+textarea { width: 100%; resize: vertical; }
 input[type="number"] { width: 64px; }
 .zoom { display: inline-flex; gap: 4px; }
 
@@ -177,6 +178,14 @@ mark { background: var(--hit); color: inherit; }
 .review { border-top: 1px solid var(--line); padding-top: 12px; margin-top: 12px; }
 .review h3 { margin: 0 0 6px; font-size: 0.95rem; }
 .review p { margin: 4px 0; }
+
+/* -- free-text Q&A ----------------------------------------------------- */
+
+.qa-editor { max-width: 960px; width: 100%; margin: 0 auto; }
+.qa-prompt { display: block; font-size: 1.2rem; font-weight: 650; margin: 14px 0 12px; }
+.qa-editor textarea { min-height: 220px; line-height: 1.6; padding: 12px; }
+.qa-review { max-width: 960px; width: 100%; margin: 0 auto; }
+.qa-answer { white-space: pre-wrap; }
 
 /* -- flashcards --------------------------------------------------------- */
 

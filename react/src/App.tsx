@@ -6,10 +6,12 @@ import { ReportsView } from "./views/ReportsView";
 import { SlidesView } from "./views/SlidesView";
 import { DatatableView } from "./views/DatatableView";
 import { InfographicView } from "./views/InfographicView";
+import { QandaView } from "./views/QandaView";
 
 /** One route per tkinter launcher. */
 const ROUTES = [
   { path: "quizzes", label: "Quizzes", element: <QuizView /> },
+  { path: "qanda", label: "Q&A", element: <QandaView /> },
   { path: "flashcards", label: "Flashcards", element: <FlashcardsView /> },
   { path: "mindmaps", label: "Mind maps", element: <MindmapView /> },
   { path: "reports", label: "Reports", element: <ReportsView /> },
