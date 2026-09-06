@@ -1,0 +1,4 @@
+Can you integrate podcasts.py to python folder also create a short podcast for chinese_classics based on the skill skills/podcast-json?  
+Maybe create a skill for ollama-podcast so it will generate podcast via ollama? 
+And also provide gui support in both python and react format for the podcast? 
+(allow user to download the podcast)?

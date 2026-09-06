@@ -1,0 +1,26 @@
+{
+  "sha256": "92da2ef4ec41c8664a41c642f8e42c716c1f54bb9aa5572281b196e8eecb0cb2",
+  "frames": 421800,
+  "identity": {
+    "context": {
+      "schema": 1,
+      "sample_rate": 24000,
+      "model": "hexgrad/Kokoro-82M",
+      "lang_code": "a",
+      "packages": {
+        "kokoro": "0.9.4",
+        "misaki": "0.9.4",
+        "torch": "2.11.0+cu128"
+      }
+    },
+    "turn": {
+      "segment": "Seeing Without Clinging",
+      "speaker": "daniel",
+      "voice": "am_michael",
+      "text": "The Qingjing Jing approaches the grip from another angle. It says people love clarity and stillness, yet desires disturb the mind. Its practice is observation: look at mind, form, and world until attachment relaxes and clarity can return.",
+      "speed": 1.04,
+      "pause_ms": 250
+    },
+    "voice_hash": null
+  }
+}

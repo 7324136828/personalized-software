@@ -22,7 +22,7 @@ class AudioGenerator:
     def __init__(
         self,
         llm_client: BaseLLMClient,
-        rag_system: RAGSystem
+        rag_system: Optional[RAGSystem]
     ):
         self.llm_client = llm_client
         self.rag = rag_system
@@ -46,7 +46,11 @@ class AudioGenerator:
         
         # Retrieve relevant context
         LOG.info(f"Retrieving context for topic: {topic}")
-        context_chunks = self.rag.retrieve(topic, top_k=20, source_id=source_id)
+        context_chunks = (
+            self.rag.retrieve(topic, top_k=20, source_id=source_id)
+            if self.rag is not None
+            else []
+        )
         
         if not context_chunks:
             LOG.warning("No relevant context found, generating without RAG")
@@ -130,7 +134,7 @@ The podcast should be informative yet conversational, like a discussion between 
                 temperature=0.8
             )
             
-            podcast_data = json.loads(response)
+            podcast_data = response if isinstance(response, dict) else json.loads(response)
             return PodcastOutline(**podcast_data)
             
         except Exception as e:
@@ -147,10 +151,14 @@ The podcast should be informative yet conversational, like a discussion between 
         # Map speakers to cast format
         cast = []
         speaker_voice_map = {}
-        for speaker in outline.speakers:
+        for index, speaker in enumerate(outline.speakers):
+            display_name = speaker.id.replace("_", " ").title()
             cast.append({
                 "speaker_id": speaker.id,
-                "voice_file": speaker.voice
+                "host_id": f"HOST_{chr(65 + index)}",
+                "name": display_name,
+                "voice_file": speaker.voice,
+                "style": "Conversational and clear."
             })
             speaker_voice_map[speaker.id] = speaker.voice
         
@@ -161,12 +169,23 @@ The podcast should be informative yet conversational, like a discussion between 
         segment_count = 1
         
         for i, segment in enumerate(outline.segments):
+            emotion = (segment.emotion or "").lower()
+            cue = next(
+                (name for name in ("calm", "upbeat", "dramatic", "reflective") if name in emotion),
+                "",
+            )
             scene = {
                 "speaker_id": segment.speaker,
                 "dialogue": segment.text,
-                "directions": f"[emotion: {segment.emotion}] [pause={segment.pause_after_ms}]"
+                "directions": f"[{cue}]" if cue else ""
             }
             current_segment.append(scene)
+            if segment.pause_after_ms:
+                current_segment.append({
+                    "speaker_id": segment.speaker,
+                    "dialogue": "",
+                    "directions": f"[pause={min(max(segment.pause_after_ms, 0), 60000)}]",
+                })
             
             # Start new segment every 4-5 scenes
             if len(current_segment) >= 5 or i == len(outline.segments) - 1:
@@ -203,7 +222,8 @@ The podcast should be informative yet conversational, like a discussion between 
         duration_minutes: int = 10,
         speakers: Optional[List[dict]] = None,
         style: str = "educational",
-        audio_format: str = "mp3"
+        audio_format: str = "mp3",
+        device: str = "auto",
     ):
         """Complete pipeline: generate outline, convert to JSON, and create audio."""
         
@@ -225,15 +245,17 @@ The podcast should be informative yet conversational, like a discussion between 
             original_argv = sys.argv
             sys.argv = [
                 "podcast.py",
-                "--input", str(json_path.parent),
+                "--input", str(json_path),
                 "--output", str(output_path),
-                "--format", audio_format
+                "--format", audio_format,
+                "--device", device,
             ]
             
             LOG.info("Generating audio with Kokoro...")
-            result = podcast_main()
-            
-            sys.argv = original_argv
+            try:
+                result = podcast_main()
+            finally:
+                sys.argv = original_argv
             
             if result == 0:
                 LOG.info(f"Successfully generated audio: {output_path}")
@@ -265,6 +287,7 @@ def main():
     parser.add_argument("--embedding-model", type=str, default=None, help="Embedding model (provider-specific)")
     parser.add_argument("--api-key", type=str, default=None, help="API key for OpenAI/Claude")
     parser.add_argument("--json-only", action="store_true", help="Only generate JSON, not audio")
+    parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto", help="Kokoro device")
     
     args = parser.parse_args()
     
@@ -309,7 +332,7 @@ def main():
         # Generate complete audio
         generator.generate_audio(
             args.topic, args.output, duration_minutes=args.duration, style=args.style,
-            audio_format=args.format
+            audio_format=args.format, device=args.device
         )
 
 

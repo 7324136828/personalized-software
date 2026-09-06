@@ -1,0 +1,26 @@
+{
+  "sha256": "6043c420a1d463d946725d1942bf8b2233f172de243ec85f2ae8f9431acdb755",
+  "frames": 12000,
+  "identity": {
+    "context": {
+      "schema": 1,
+      "sample_rate": 24000,
+      "model": "hexgrad/Kokoro-82M",
+      "lang_code": "a",
+      "packages": {
+        "kokoro": "0.9.4",
+        "misaki": "0.9.4",
+        "torch": "2.11.0+cu128"
+      }
+    },
+    "turn": {
+      "segment": "Closing Practice",
+      "speaker": "",
+      "voice": "",
+      "text": "",
+      "speed": 1.0,
+      "pause_ms": 500
+    },
+    "voice_hash": null
+  }
+}

@@ -25,7 +25,7 @@ No `npm run sync` step is needed. See `react/README.md` for details.
 - **Free-text Q&A**: Prompted written responses with temporary autosave and JSON download
 - **Mind Maps**: Hierarchical concept maps
 - **Slide Decks**: Presentation slides with GUI viewer
-- **Audio Overviews**: Podcast-style audio generation with Kokoro TTS
+- **Audio Podcasts**: Ollama-generated scripts, Kokoro speech, transcript viewers, and MP3/WAV downloads
 - **Data Tables**: Structured data extraction
 - **Infographics**: Visual one-page summaries with HTML export
 
@@ -54,9 +54,9 @@ Click any screenshot to open the full-resolution image.
 | --- | --- |
 | [![Report viewer](images/reports.png)](images/reports.png) | [![Data table viewer](images/data-table.png)](images/data-table.png) |
 
-| Infographics |
-| --- |
-| [![Infographic viewer](images/infographics.png)](images/infographics.png) |
+| Infographics | Podcasts |
+| --- | --- |
+| [![Infographic viewer](images/infographics.png)](images/infographics.png) | [![Podcast player](images/podcast.png)](images/podcast.png) |
 
 ## Architecture
 
@@ -194,7 +194,9 @@ The requirements file includes:
 │   │   ├── slides.py
 │   │   ├── audio.py
 │   │   └── datatable.py
-│   └── podcast.py         # Existing Kokoro podcast generator
+│   ├── podcast.py          # Canonical Kokoro podcast renderer
+│   ├── podcasts.py         # Compatibility command entry point
+│   └── podcast_launcher.py # Desktop player, transcript, and downloads
 ├── skills/                # Devin skill definitions
 │   ├── ollama-reports/
 │   ├── ollama-flashcards/
@@ -354,6 +356,41 @@ python python/ollama_learning/audio.py \
   --provider ollama \
   --model qwen2.5
 ```
+
+#### Podcast sample, validation, and viewers
+
+The reusable Chinese classics sample is at
+`examples/podcasts/classical_chinese.json`. Generate a new script with Ollama
+and render it with Kokoro:
+
+```powershell
+python -m python.ollama_learning.audio `
+  --input input/classical_chinese `
+  --topic 'Stillness, emptiness, and ethical life in Chinese classics' `
+  --output output/podcasts/classical_chinese.mp3 `
+  --duration 4 `
+  --provider ollama `
+  --model qwen2.5 `
+  --device auto
+```
+
+To validate or render existing podcast JSON without invoking an LLM:
+
+```powershell
+python python/podcasts.py --input examples/podcasts/classical_chinese.json --dry-run
+python python/podcasts.py --input examples/podcasts/classical_chinese.json `
+  --output output/podcasts/classical_chinese.mp3 --device auto
+```
+
+Open the **Podcasts** tab after running `run.bat`, or launch the desktop viewer:
+
+```powershell
+python python/podcast_launcher.py --podcast-dir output/podcasts
+```
+
+Both interfaces show the transcript and let the listener download the audio and
+JSON script. Keep the JSON and MP3/WAV basenames identical so the viewers
+associate them.
 
 ### Data Tables
 
@@ -578,12 +615,13 @@ python python/launcher_common.py
 Use `--list` to inspect availability without opening a window, or
 `--launch qanda` (and the other listed names) to open a viewer directly.
 
-Flashcards, quizzes, Q&A sets, and slide decks include interactive controls:
+Flashcards, quizzes, Q&A sets, slide decks, and podcasts include interactive controls:
 
 - **Flashcards**: Space to flip, arrows to navigate
 - **Quizzes**: Multiple choice with immediate feedback
 - **Q&A**: Free-text responses with temporary autosave and JSON export
 - **Slides**: Arrow keys to navigate, space for notes
+- **Podcasts**: Browser/system playback, readable transcripts, and audio/JSON downloads
 
 Use the `--interactive` flag to launch the GUI.
 
@@ -666,6 +704,8 @@ Each feature has a corresponding Devin skill in the `skills/` directory:
 - `skills/ollama-mindmap/` - Mind map generation (multi-provider)
 - `skills/ollama-slides/` - Slide deck generation (multi-provider)
 - `skills/ollama-audio/` - Audio overview generation (multi-provider)
+- `skills/ollama-podcast/` - Source-grounded Ollama-to-Kokoro podcast workflow
+- `skills/podcast-json/` - Podcast script contract and reusable JSON template
 - `skills/ollama-datatable/` - Data table extraction (multi-provider)
 - `skills/ollama-infographic/` - Infographic generation (multi-provider)
 

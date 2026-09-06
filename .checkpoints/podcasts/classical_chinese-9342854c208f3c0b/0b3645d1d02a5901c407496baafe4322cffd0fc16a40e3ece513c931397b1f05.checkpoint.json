@@ -1,0 +1,26 @@
+{
+  "sha256": "53d74561e8d9b4089b407b399d7c2857640d696d3928898d7dbe7873b4d6df16",
+  "frames": 391200,
+  "identity": {
+    "context": {
+      "schema": 1,
+      "sample_rate": 24000,
+      "model": "hexgrad/Kokoro-82M",
+      "lang_code": "a",
+      "packages": {
+        "kokoro": "0.9.4",
+        "misaki": "0.9.4",
+        "torch": "2.11.0+cu128"
+      }
+    },
+    "turn": {
+      "segment": "Seeing Without Clinging",
+      "speaker": "maya",
+      "voice": "af_heart",
+      "text": "Both texts warn against turning insight into a possession. The Heart Sutra speaks of no attainment. The Qingjing Jing says that even attaining the Dao leaves nothing to be gained. Wisdom changes how one responds; it isn't a trophy for the self.",
+      "speed": 0.96,
+      "pause_ms": 250
+    },
+    "voice_hash": null
+  }
+}

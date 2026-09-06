@@ -1,0 +1,26 @@
+{
+  "sha256": "f79ad8ba1026db9155cc0fc685d35e5f528b734baf228336eab36096ffe911ef",
+  "frames": 523800,
+  "identity": {
+    "context": {
+      "schema": 1,
+      "sample_rate": 24000,
+      "model": "hexgrad/Kokoro-82M",
+      "lang_code": "a",
+      "packages": {
+        "kokoro": "0.9.4",
+        "misaki": "0.9.4",
+        "torch": "2.11.0+cu128"
+      }
+    },
+    "turn": {
+      "segment": "From Insight to Household and Society",
+      "speaker": "maya",
+      "voice": "af_heart",
+      "text": "The family instructions move from contemplation to habits: rise early, keep the household orderly, value the labor behind food and objects, prepare before crisis, avoid exploiting others, and help neighbors in need. Some gender and household assumptions belong to their historical setting and deserve critical distance.",
+      "speed": 0.96,
+      "pause_ms": 800
+    },
+    "voice_hash": null
+  }
+}

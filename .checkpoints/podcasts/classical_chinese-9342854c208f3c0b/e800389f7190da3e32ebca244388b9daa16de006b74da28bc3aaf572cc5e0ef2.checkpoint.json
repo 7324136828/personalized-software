@@ -1,0 +1,26 @@
+{
+  "sha256": "c8dd78118a80b65f26af4180b03c30dfb6a37d8450023dc1691ee44cba331ad4",
+  "frames": 363600,
+  "identity": {
+    "context": {
+      "schema": 1,
+      "sample_rate": 24000,
+      "model": "hexgrad/Kokoro-82M",
+      "lang_code": "a",
+      "packages": {
+        "kokoro": "0.9.4",
+        "misaki": "0.9.4",
+        "torch": "2.11.0+cu128"
+      }
+    },
+    "turn": {
+      "segment": "A Shared Question",
+      "speaker": "maya",
+      "voice": "af_heart",
+      "text": "Welcome to The Curious Machine. I'm Maya. Today we're listening for a conversation among five Chinese classics: the Heart Sutra, the Qingjing Jing, the Yin Fu Jing, and the family instructions associated with Zhu and Qian.",
+      "speed": 0.96,
+      "pause_ms": 0
+    },
+    "voice_hash": null
+  }
+}

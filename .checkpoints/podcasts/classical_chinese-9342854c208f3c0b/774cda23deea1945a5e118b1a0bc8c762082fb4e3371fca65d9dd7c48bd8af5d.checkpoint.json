@@ -1,0 +1,26 @@
+{
+  "sha256": "5ae07e6de2629b735aa091a56b3c95d38380b8e1ed580cac5b85539524dba08f",
+  "frames": 241200,
+  "identity": {
+    "context": {
+      "schema": 1,
+      "sample_rate": 24000,
+      "model": "hexgrad/Kokoro-82M",
+      "lang_code": "a",
+      "packages": {
+        "kokoro": "0.9.4",
+        "misaki": "0.9.4",
+        "torch": "2.11.0+cu128"
+      }
+    },
+    "turn": {
+      "segment": "Closing Practice",
+      "speaker": "maya",
+      "voice": "af_heart",
+      "text": "The classics don't give identical answers, but they make that pause intellectually rich and ethically demanding. Thanks for listening to The Curious Machine.",
+      "speed": 0.96,
+      "pause_ms": 250
+    },
+    "voice_hash": null
+  }
+}

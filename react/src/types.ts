@@ -12,7 +12,8 @@ export type Kind =
   | "reports"
   | "slides"
   | "datatables"
-  | "infographics";
+  | "infographics"
+  | "podcasts";
 
 export interface ManifestEntry {
   file: string;
@@ -177,4 +178,32 @@ export interface Infographic {
   title: string;
   subtitle: string | null;
   sections: InfographicSection[];
+}
+
+// -- Podcasts --------------------------------------------------------------
+
+export interface PodcastCastMember {
+  speaker_id: string;
+  host_id: string;
+  name: string;
+  voice_file: string;
+  style: string;
+}
+
+export interface PodcastScene {
+  speaker_id: string;
+  dialogue: string;
+  directions: string;
+}
+
+export interface PodcastSegment {
+  segment_name: string;
+  scenes: PodcastScene[];
+}
+
+export interface PodcastEpisode {
+  episode_title: string;
+  podcast_show: string;
+  cast: PodcastCastMember[];
+  script: PodcastSegment[];
 }

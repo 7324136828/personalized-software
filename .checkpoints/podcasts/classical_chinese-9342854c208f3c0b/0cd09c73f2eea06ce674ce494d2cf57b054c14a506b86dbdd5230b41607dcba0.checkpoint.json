@@ -1,0 +1,26 @@
+{
+  "sha256": "e52a914d6485825a31043fd42b0abd37923efe2232ad060f01297fefe808ce06",
+  "frames": 341400,
+  "identity": {
+    "context": {
+      "schema": 1,
+      "sample_rate": 24000,
+      "model": "hexgrad/Kokoro-82M",
+      "lang_code": "a",
+      "packages": {
+        "kokoro": "0.9.4",
+        "misaki": "0.9.4",
+        "torch": "2.11.0+cu128"
+      }
+    },
+    "turn": {
+      "segment": "Closing Practice",
+      "speaker": "daniel",
+      "voice": "am_michael",
+      "text": "Here's a small practice for today. Before one decision, pause and ask three questions: What am I clinging to? What consequence am I overlooking? And what choice serves more than my immediate advantage?",
+      "speed": 1.04,
+      "pause_ms": 800
+    },
+    "voice_hash": null
+  }
+}

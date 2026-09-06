@@ -1,0 +1,26 @@
+{
+  "sha256": "8cff52a630055b1ecd1786d1942c13a3c3fb6cb51cb41e7f664ecc7daf807c0e",
+  "frames": 402600,
+  "identity": {
+    "context": {
+      "schema": 1,
+      "sample_rate": 24000,
+      "model": "hexgrad/Kokoro-82M",
+      "lang_code": "a",
+      "packages": {
+        "kokoro": "0.9.4",
+        "misaki": "0.9.4",
+        "torch": "2.11.0+cu128"
+      }
+    },
+    "turn": {
+      "segment": "From Insight to Household and Society",
+      "speaker": "daniel",
+      "voice": "am_michael",
+      "text": "The Qian instructions widen that ethic. Wealth should support relatives, schools, relief, roads, and public welfare. Officials should resist corruption, share credit, cultivate talent, and seek benefits that last beyond the present generation.",
+      "speed": 1.04,
+      "pause_ms": 250
+    },
+    "voice_hash": null
+  }
+}

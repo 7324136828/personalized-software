@@ -221,6 +221,7 @@ __marimo__/
 /input/
 /output/
 /react/public/data/
+/.checkpoints/
 
 # Node.js dependencies and build output
 node_modules/
