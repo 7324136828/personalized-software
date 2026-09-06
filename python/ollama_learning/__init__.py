@@ -1,23 +1,42 @@
 """Ollama Learning - Generate educational content from documents using multiple LLM providers."""
 
+from importlib import import_module
+
 from .client_interface import BaseLLMClient, create_client
-from .ollama_client import OllamaClient
-from .ollama_client_impl import OllamaClientImpl
-from .openai_client_impl import OpenAIClientImpl
-from .claude_client_impl import ClaudeClientImpl
-from .rag_system import RAGSystem, DocumentChunk
 from .schemas import (
     PodcastOutline, Presentation, MindMap, Report,
     FlashcardSet, Quiz, QASet, QAPrompt, DataTable
 )
-from .reports import ReportGenerator
-from .flashcards import FlashcardGenerator, FlashcardViewer
-from .quiz import QuizGenerator, QuizViewer
-from .qanda import QAGenerator
-from .mindmap import MindMapGenerator
-from .slides import SlideGenerator, SlideViewer
-from .audio import AudioGenerator
-from .datatable import DataTableExtractor
+
+
+_LAZY_EXPORTS = {
+    'OllamaClient': '.ollama_client',
+    'OllamaClientImpl': '.ollama_client_impl',
+    'OpenAIClientImpl': '.openai_client_impl',
+    'ClaudeClientImpl': '.claude_client_impl',
+    'RAGSystem': '.rag_system',
+    'DocumentChunk': '.rag_system',
+    'ReportGenerator': '.reports',
+    'FlashcardGenerator': '.flashcards',
+    'FlashcardViewer': '.flashcards',
+    'QuizGenerator': '.quiz',
+    'QuizViewer': '.quiz',
+    'QAGenerator': '.qanda',
+    'MindMapGenerator': '.mindmap',
+    'SlideGenerator': '.slides',
+    'SlideViewer': '.slides',
+    'AudioGenerator': '.audio',
+    'DataTableExtractor': '.datatable',
+}
+
+
+def __getattr__(name: str):
+    module_name = _LAZY_EXPORTS.get(name)
+    if module_name is None:
+        raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
+    value = getattr(import_module(module_name, __name__), name)
+    globals()[name] = value
+    return value
 
 __all__ = [
     "BaseLLMClient",

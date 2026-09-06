@@ -21,6 +21,7 @@ class BackendTest(unittest.TestCase):
         self.responses = root / "responses"
         self.static = root / "dist"
         (self.output / "qandas").mkdir(parents=True)
+        (self.output / 'podcasts').mkdir(parents=True)
         self.static.mkdir()
         (self.static / "index.html").write_text("<h1>app</h1>", encoding="utf-8")
         (self.output / "qandas" / "reflection.json").write_text(
@@ -28,6 +29,23 @@ class BackendTest(unittest.TestCase):
             encoding="utf-8",
         )
         self.server = create_server("127.0.0.1", 0, self.output, self.responses, self.static)
+        (self.output / 'podcasts' / 'sample.json').write_text(
+            json.dumps(
+                {
+                    'episode_title': 'Sample Episode',
+                    'podcast_show': 'Test Show',
+                    'cast': [{'speaker_id': 'host', 'voice_file': 'af_heart'}],
+                    'script': [
+                        {
+                            'segment_name': 'Intro',
+                            'scenes': [{'speaker_id': 'host', 'dialogue': 'Hello.'}],
+                        }
+                    ],
+                }
+            ),
+            encoding='utf-8',
+        )
+        (self.output / 'podcasts' / 'sample.mp3').write_bytes(b'ID3-test-audio')
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.base = f"http://127.0.0.1:{self.server.server_port}"
@@ -53,6 +71,18 @@ class BackendTest(unittest.TestCase):
         status, manifest = self.request("/api/content/manifest")
         self.assertEqual(status, 200)
         self.assertEqual(manifest["kinds"]["qandas"][0]["file"], "reflection.json")
+
+    def test_podcast_manifest_and_audio_download(self) -> None:
+        status, manifest = self.request('/api/content/manifest')
+        self.assertEqual(status, 200)
+        podcast = manifest['kinds']['podcasts'][0]
+        self.assertEqual(podcast['title'], 'Sample Episode')
+        self.assertEqual(podcast['sidecars'], ['sample.mp3'])
+
+        with urlopen(self.base + '/api/content/podcasts/sample.mp3') as response:
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.headers.get_content_type(), 'audio/mpeg')
+            self.assertEqual(response.read(), b'ID3-test-audio')
 
     def test_qanda_session_round_trip(self) -> None:
         status, session = self.request(
