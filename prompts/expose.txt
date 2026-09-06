@@ -1,0 +1,1 @@
+Can you make a code change in the vite serving so that [http://127.0.0.1:4173](http://127.0.0.1:4173) can be exported to the local internet and I can visit it from another device on the same network just like using python -m http.server?

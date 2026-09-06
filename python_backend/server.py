@@ -12,6 +12,7 @@ import json
 import mimetypes
 import os
 import re
+import socket
 import subprocess
 import sys
 import tempfile
@@ -378,15 +379,69 @@ def create_server(
     return ThreadingHTTPServer((host, port), handler)
 
 
+WILDCARD_HOSTS = {"0.0.0.0", "::", ""}
+
+
+def is_wildcard_host(host: str) -> bool:
+    """True when the server is bound to every interface, not just loopback."""
+    return host in WILDCARD_HOSTS
+
+
+def local_ip() -> str | None:
+    """Best-effort LAN address of this machine, for sharing with other devices."""
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        # No packets are sent; this just picks the interface that would route out.
+        probe.connect(("192.0.2.1", 9))
+        return probe.getsockname()[0]
+    except OSError:
+        return None
+    finally:
+        probe.close()
+
+
+def browser_url(host: str, port: int) -> str:
+    """A URL this machine's browser can open (0.0.0.0 is not routable)."""
+    shown = "localhost" if is_wildcard_host(host) else host
+    return f"http://{shown}:{port}"
+
+
+def print_reachable_urls(label: str, host: str, port: int) -> None:
+    """Print the loopback URL and, when bound wide, the LAN URL to share."""
+    if is_wildcard_host(host):
+        print(f"[backend] {label} (this device): http://localhost:{port}", flush=True)
+        address = local_ip()
+        if address:
+            print(
+                f"[backend] {label} (other devices on this network): "
+                f"http://{address}:{port}",
+                flush=True,
+            )
+        else:
+            print(
+                "[backend] Could not determine this machine's LAN address; "
+                "use its IP with the port above.",
+                flush=True,
+            )
+    else:
+        print(f"[backend] {label}: http://{host}:{port}", flush=True)
+
+
 def run_development(args: argparse.Namespace) -> int:
     """Run the API beside Vite and stop both together on Ctrl+C."""
     server = create_server(args.host, args.port, args.output_dir, args.response_dir, args.static_dir)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    api_url = f"http://{args.host}:{server.server_port}"
+    # Vite runs the proxy on this machine, so it always reaches the API over
+    # loopback regardless of what the API is also bound to.
+    api_url = f"http://127.0.0.1:{server.server_port}"
     print(f"[backend] API: {api_url}/api", flush=True)
 
     command = ["npm.cmd" if os.name == "nt" else "npm", "run", "dev:frontend", "--", "--port", str(args.frontend_port)]
+    if is_wildcard_host(args.host):
+        # Expose the Vite dev server on the LAN as well as the API.
+        command += ["--host", "0.0.0.0"]
+    print_reachable_urls("App", args.host, args.frontend_port)
     env = os.environ.copy()
     env["CONTENT_API_TARGET"] = api_url
     if args.open:
@@ -402,7 +457,16 @@ def run_development(args: argparse.Namespace) -> int:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Serve learning content and temporary Q&A responses")
-    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Interface to bind (use 0.0.0.0 to reach it from other devices)",
+    )
+    parser.add_argument(
+        "--lan",
+        action="store_true",
+        help="Shortcut for --host 0.0.0.0: serve to other devices on this network",
+    )
     parser.add_argument("--port", type=int, default=8765, help="Backend/production web port")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--response-dir", type=Path, default=DEFAULT_RESPONSE_DIR)
@@ -410,7 +474,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--dev", action="store_true", help="Run the API and Vite development server together")
     parser.add_argument("--frontend-port", type=int, default=5174)
     parser.add_argument("--open", action="store_true", help="Open the application in a browser")
-    return parser.parse_args(argv)
+    parsed = parser.parse_args(argv)
+    if parsed.lan and parsed.host == "127.0.0.1":
+        parsed.host = "0.0.0.0"
+    return parsed
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -419,12 +486,11 @@ def main(argv: list[str] | None = None) -> int:
         return run_development(args)
 
     server = create_server(args.host, args.port, args.output_dir, args.response_dir, args.static_dir)
-    url = f"http://{args.host}:{server.server_port}"
-    print(f"[backend] Application: {url}", flush=True)
+    print_reachable_urls("Application", args.host, server.server_port)
     print(f"[backend] Content: {args.output_dir.resolve()}", flush=True)
     print(f"[backend] Temporary Q&A responses: {args.response_dir.resolve()}", flush=True)
     if args.open:
-        webbrowser.open(f"{url}/#/qanda")
+        webbrowser.open(f"{browser_url(args.host, server.server_port)}/#/qanda")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
