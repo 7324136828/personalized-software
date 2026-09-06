@@ -116,6 +116,19 @@ You can use different providers for different tasks. Each command accepts a `--p
 
 ## Installation
 
+With Python 3.11+ installed, the setup command creates `.venv`, installs both
+Python and React dependencies, and runs the backend tests plus React checks.
+`setup.bat` is a one-line wrapper around `setup_environment.py`:
+
+```bat
+setup.bat
+```
+
+The cross-platform equivalent is `python setup_environment.py`.
+
+Use `setup.bat --skip-verify` when you only want to install or refresh
+dependencies. The equivalent manual setup is:
+
 ```bash
 # Create and activate a local Python environment (Windows)
 python -m venv .venv
@@ -536,10 +549,20 @@ python python/ollama_learning/datatable.py \
 
 ## Interactive GUIs
 
-Flashcards, quizzes, and slide decks include interactive GUI viewers:
+Open the desktop viewer hub and choose any available content type:
+
+```bash
+python python/launcher_common.py
+```
+
+Use `--list` to inspect availability without opening a window, or
+`--launch qanda` (and the other listed names) to open a viewer directly.
+
+Flashcards, quizzes, Q&A sets, and slide decks include interactive controls:
 
 - **Flashcards**: Space to flip, arrows to navigate
 - **Quizzes**: Multiple choice with immediate feedback
+- **Q&A**: Free-text responses with temporary autosave and JSON export
 - **Slides**: Arrow keys to navigate, space for notes
 
 Use the `--interactive` flag to launch the GUI.
