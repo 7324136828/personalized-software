@@ -1,0 +1,1 @@
+WIthout calling other agentic tools, can we create a series of mindmaps from input/classical_chinese. Make sure mindmaps have the correct format specified under skills? Can you also create a sample python application to launch the mindmaps via gui so we can better visualize them?

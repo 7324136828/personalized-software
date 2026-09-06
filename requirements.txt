@@ -1,0 +1,13 @@
+kokoro
+numpy
+imageio-ffmpeg
+
+# Ollama Learning System
+requests>=2.31.0
+pydantic>=2.0.0
+pandas>=2.0.0
+openpyxl>=3.1.0
+
+# Multi-LLM Provider Support
+openai>=1.0.0
+anthropic>=0.18.0
