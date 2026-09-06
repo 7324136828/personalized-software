@@ -117,12 +117,19 @@ You can use different providers for different tasks. Each command accepts a `--p
 ## Installation
 
 ```bash
-# Install Python dependencies
-pip install -r requirements.txt
+# Create and activate a local Python environment (Windows)
+python -m venv .venv
+.venv\Scripts\activate
 
-# For audio generation, ensure Kokoro dependencies are installed
-pip install kokoro numpy imageio-ffmpeg
+# Install Python and React dependencies
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+cd react
+npm install
 ```
+
+On macOS or Linux, activate with `source .venv/bin/activate`. `run.bat` and the
+React npm scripts automatically prefer the repository `.venv` when it exists.
 
 The requirements file includes:
 - Ollama support: `requests`

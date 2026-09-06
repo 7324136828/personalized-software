@@ -62,15 +62,21 @@ if errorlevel 1 (
 )
 
 if /i not "%COMMAND%"=="build" (
-    set "PYTHON=python"
-    where python >nul 2>&1
-    if errorlevel 1 (
-        where py >nul 2>&1
+    set "PYTHON_EXE=%ROOT%.venv\Scripts\python.exe"
+    set "PYTHON_ARGS="
+    if not exist "!PYTHON_EXE!" (
+        set "PYTHON_EXE=python"
+        where python >nul 2>&1
         if errorlevel 1 (
-            echo [run] ERROR: Python was not found on PATH.
-            goto fail
+            where py >nul 2>&1
+            if errorlevel 1 (
+                echo [run] ERROR: Python was not found on PATH.
+                echo [run] Create .venv or install Python 3.11+.
+                goto fail
+            )
+            set "PYTHON_EXE=py"
+            set "PYTHON_ARGS=-3"
         )
-        set "PYTHON=py -3"
     )
 )
 
@@ -109,9 +115,9 @@ if /i "%COMMAND%"=="dev" (
     echo [run] Starting the backend and dev server on port %PORT% ...
     echo.
     if "%OPEN%"=="1" (
-        call %PYTHON% "%ROOT%python_backend\server.py" --dev --frontend-port %PORT% --open
+        call "!PYTHON_EXE!" !PYTHON_ARGS! "%ROOT%python_backend\server.py" --dev --frontend-port %PORT% --open
     ) else (
-        call %PYTHON% "%ROOT%python_backend\server.py" --dev --frontend-port %PORT%
+        call "!PYTHON_EXE!" !PYTHON_ARGS! "%ROOT%python_backend\server.py" --dev --frontend-port %PORT%
     )
     goto popdone
 )
@@ -147,9 +153,9 @@ echo [run] Press Ctrl+C to stop the server.
 echo.
 
 if "%OPEN%"=="1" (
-    call %PYTHON% "%ROOT%python_backend\server.py" --port %PORT% --open
+    call "!PYTHON_EXE!" !PYTHON_ARGS! "%ROOT%python_backend\server.py" --port %PORT% --open
 ) else (
-    call %PYTHON% "%ROOT%python_backend\server.py" --port %PORT%
+    call "!PYTHON_EXE!" !PYTHON_ARGS! "%ROOT%python_backend\server.py" --port %PORT%
 )
 if errorlevel 1 (
     echo [run] ERROR: backend server exited with an error.
