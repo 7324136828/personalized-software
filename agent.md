@@ -1,0 +1,1 @@
+Make sure whenever there's a change in python for the windows UI, we will make relative changes in the react folder. In future, we will also support android and iOS development.

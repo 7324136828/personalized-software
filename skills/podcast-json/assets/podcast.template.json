@@ -1,0 +1,99 @@
+{
+  "episode_title": "{{episode_title}}",
+  "podcast_show": "The Curious Machine",
+  "cast": [
+    {
+      "speaker_id": "maya",
+      "host_id": "HOST_A",
+      "name": "Maya",
+      "voice_file": "af_heart",
+      "style": "Calm, articulate, and thoughtful. Explains ideas with clear examples."
+    },
+    {
+      "speaker_id": "daniel",
+      "host_id": "HOST_B",
+      "name": "Daniel",
+      "voice_file": "am_michael",
+      "style": "Upbeat, curious, and conversational. Asks useful questions and tests ideas."
+    }
+  ],
+  "script": [
+    {
+      "segment_name": "Intro",
+      "scenes": [
+        {
+          "speaker_id": "maya",
+          "directions": "[calm]",
+          "dialogue": "{{welcome_show_name_and_introduce_maya}}"
+        },
+        {
+          "speaker_id": "daniel",
+          "directions": "[upbeat]",
+          "dialogue": "{{introduce_daniel_and_pose_the_episode_question}}"
+        },
+        {
+          "speaker_id": "maya",
+          "directions": "[pause=400]",
+          "dialogue": "{{explain_why_the_topic_matters_and_preview_the_conversation}}"
+        }
+      ]
+    },
+    {
+      "segment_name": "{{first_theme}}",
+      "scenes": [
+        {
+          "speaker_id": "daniel",
+          "dialogue": "{{ask_a_specific_question_about_the_first_theme}}"
+        },
+        {
+          "speaker_id": "maya",
+          "dialogue": "{{explain_the_first_idea_with_a_concrete_example}}"
+        },
+        {
+          "speaker_id": "daniel",
+          "dialogue": "{{add_an_insight_or_follow_up_that_advances_the_discussion}}"
+        },
+        {
+          "speaker_id": "maya",
+          "dialogue": "{{answer_the_follow_up_and_transition_to_the_next_theme}}"
+        }
+      ]
+    },
+    {
+      "segment_name": "{{second_theme}}",
+      "scenes": [
+        {
+          "speaker_id": "maya",
+          "dialogue": "{{introduce_a_second_idea_and_connect_it_to_the_first}}"
+        },
+        {
+          "speaker_id": "daniel",
+          "dialogue": "{{explore_an_application_or_reasonable_objection}}"
+        },
+        {
+          "speaker_id": "maya",
+          "directions": "[reflective] [pause=400]",
+          "dialogue": "{{respond_with_nuance_and_a_useful_takeaway}}"
+        }
+      ]
+    },
+    {
+      "segment_name": "Conclusion",
+      "scenes": [
+        {
+          "speaker_id": "daniel",
+          "dialogue": "{{summarize_the_main_insight_in_fresh_words}}"
+        },
+        {
+          "speaker_id": "maya",
+          "dialogue": "{{offer_a_final_thought_and_close_the_episode_completely}}"
+        },
+        {
+          "speaker_id": "maya",
+          "directions": "[pause=500]",
+          "dialogue": ""
+        }
+      ]
+    }
+  ]
+}
