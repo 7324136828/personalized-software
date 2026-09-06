@@ -38,6 +38,26 @@ No `npm run sync` step is needed. See `react/README.md` for details.
 - **OpenAI**: Cloud-based, high quality, structured output support (requires API key)
 - **Claude**: Advanced reasoning, long context, security-focused (requires API key)
 
+## Screenshots
+
+Click any screenshot to open the full-resolution image.
+
+| Quizzes | Free-text Q&A |
+| --- | --- |
+| [![Quiz viewer](images/quizzes.png)](images/quizzes.png) | [![Free-text Q&A viewer](images/q%26A.png)](images/q%26A.png) |
+
+| Flashcards | Mind maps |
+| --- | --- |
+| [![Flashcard viewer](images/flashcard.png)](images/flashcard.png) | [![Mind map viewer](images/mind-maps.png)](images/mind-maps.png) |
+
+| Reports | Data tables |
+| --- | --- |
+| [![Report viewer](images/reports.png)](images/reports.png) | [![Data table viewer](images/data-table.png)](images/data-table.png) |
+
+| Infographics |
+| --- |
+| [![Infographic viewer](images/infographics.png)](images/infographics.png) |
+
 ## Architecture
 
 The system follows a SOURCE → RAG → OLLAMA → JSON → RENDERER architecture:
