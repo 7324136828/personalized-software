@@ -187,6 +187,21 @@ mark { background: var(--hit); color: inherit; }
 .qa-review { max-width: 960px; width: 100%; margin: 0 auto; }
 .qa-answer { white-space: pre-wrap; }
 
+/* -- podcasts ---------------------------------------------------------- */
+
+.podcast { max-width: 900px; width: 100%; margin: 0 auto; }
+.podcast-header { padding-bottom: 20px; border-bottom: 1px solid var(--line); }
+.podcast-header h1 { margin: 2px 0 18px; font-size: 1.8rem; }
+.podcast-header audio { width: 100%; }
+.podcast-segment { padding: 20px 0 4px; }
+.podcast-segment > h2 { margin: 0 0 14px; font-size: 1.15rem; }
+.podcast-turn {
+  border-left: 3px solid var(--accent-soft); padding: 2px 0 2px 16px;
+  margin: 0 0 18px;
+}
+.podcast-turn h3 { margin: 0 0 5px; color: var(--accent); font-size: 0.85rem; }
+.podcast-turn p { margin: 0; line-height: 1.65; }
+
 /* -- flashcards --------------------------------------------------------- */
 
 .flashcard {

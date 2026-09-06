@@ -7,6 +7,7 @@ import { SlidesView } from "./views/SlidesView";
 import { DatatableView } from "./views/DatatableView";
 import { InfographicView } from "./views/InfographicView";
 import { QandaView } from "./views/QandaView";
+import { PodcastView } from "./views/PodcastView";
 
 /** One route per tkinter launcher. */
 const ROUTES = [
@@ -18,6 +19,7 @@ const ROUTES = [
   { path: "slides", label: "Slides", element: <SlidesView /> },
   { path: "datatables", label: "Data tables", element: <DatatableView /> },
   { path: "infographics", label: "Infographics", element: <InfographicView /> },
+  { path: "podcasts", label: "Podcasts", element: <PodcastView /> },
 ];
 
 export function App() {

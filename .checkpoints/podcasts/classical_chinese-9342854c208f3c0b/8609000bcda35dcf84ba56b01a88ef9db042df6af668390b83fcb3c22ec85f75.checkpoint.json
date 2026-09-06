@@ -1,0 +1,26 @@
+{
+  "sha256": "6c32d47b366a591d6cce180715355437f9d367fe6097d0da4abaf91c9621bfa9",
+  "frames": 472200,
+  "identity": {
+    "context": {
+      "schema": 1,
+      "sample_rate": 24000,
+      "model": "hexgrad/Kokoro-82M",
+      "lang_code": "a",
+      "packages": {
+        "kokoro": "0.9.4",
+        "misaki": "0.9.4",
+        "torch": "2.11.0+cu128"
+      }
+    },
+    "turn": {
+      "segment": "Seeing Without Clinging",
+      "speaker": "maya",
+      "voice": "af_heart",
+      "text": "The Heart Sutra answers through emptiness. Form, feeling, perception, mental formations, and consciousness have no fixed, independent essence. That isn't a claim that nothing matters. It loosens the grip of the categories we treat as permanent, including the frightened self that wants certainty.",
+      "speed": 0.93,
+      "pause_ms": 400
+    },
+    "voice_hash": null
+  }
+}

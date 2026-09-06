@@ -1,0 +1,26 @@
+{
+  "sha256": "6c69d7ea52fbfb578531a5066b3da817bf5545e772a7fd47c12c4c62852a0ce4",
+  "frames": 374400,
+  "identity": {
+    "context": {
+      "schema": 1,
+      "sample_rate": 24000,
+      "model": "hexgrad/Kokoro-82M",
+      "lang_code": "a",
+      "packages": {
+        "kokoro": "0.9.4",
+        "misaki": "0.9.4",
+        "torch": "2.11.0+cu128"
+      }
+    },
+    "turn": {
+      "segment": "From Insight to Household and Society",
+      "speaker": "maya",
+      "voice": "af_heart",
+      "text": "Put together, the texts suggest a sequence: examine the mind, loosen attachment, notice patterns and consequences, then build those insights into ordinary conduct. Inner clarity is tested by what happens to other people.",
+      "speed": 0.93,
+      "pause_ms": 250
+    },
+    "voice_hash": null
+  }
+}

@@ -30,10 +30,12 @@ import tempfile
 import wave
 
 
-BASE_DIR = Path(__file__).resolve().parent
-DEFAULT_INPUT = BASE_DIR / "input" / "podcast1.json"
-DEFAULT_INPUT_DIR = BASE_DIR / "input"
-DEFAULT_CHECKPOINT_DIR = BASE_DIR / ".checkpoints"
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = SCRIPT_DIR.parent
+DEFAULT_INPUT = PROJECT_ROOT / "input" / "podcast1.json"
+DEFAULT_INPUT_DIR = PROJECT_ROOT / "input"
+DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "output" / "podcasts"
+DEFAULT_CHECKPOINT_DIR = PROJECT_ROOT / ".checkpoints" / "podcasts"
 MODEL_REPO = "hexgrad/Kokoro-82M"
 SAMPLE_RATE = 24_000
 LOG = logging.getLogger("podcast")
@@ -435,7 +437,7 @@ def main() -> int:
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT_DIR,
                         help="JSON file or folder to scan for *.json (default: input/)")
     parser.add_argument("--output", type=Path, help="Exact MP3/WAV path; requires exactly one input file")
-    parser.add_argument("--output-dir", type=Path, default=BASE_DIR / "output")
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--format", choices=("mp3", "wav"), default="mp3")
     parser.add_argument("--checkpoint-dir", type=Path, default=DEFAULT_CHECKPOINT_DIR)
     checkpoint_options = parser.add_mutually_exclusive_group()

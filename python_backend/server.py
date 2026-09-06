@@ -42,6 +42,7 @@ KINDS: dict[str, tuple[str, ...]] = {
     "slides": (".md",),
     "datatables": (".csv",),
     "infographics": (".html", ".svg", ".md", ".wireframe.txt"),
+    "podcasts": (".mp3", ".wav"),
 }
 
 SESSION_ID = re.compile(r"^[0-9a-f]{32}$")
@@ -77,7 +78,7 @@ def build_manifest(output_dir: Path) -> dict[str, Any]:
                 if not isinstance(data, dict):
                     continue
                 stem = path.stem
-                title = data.get("title") or data.get("name") or stem
+                title = data.get("title") or data.get("name") or data.get("episode_title") or stem
                 sidecars = [
                     f"{stem}{suffix}"
                     for suffix in sidecar_suffixes

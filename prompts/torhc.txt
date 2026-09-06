@@ -1,0 +1,7 @@
+can you make changes in the setup script for the following? and also run the command for install the torch cuda?
+during setup if cuda device has been detected for "NVIDIA GeForce RTX"
+uninstall torch 
+and install 
+torch                      2.11.0+cu128
+torchaudio                 2.11.0+cu128
+torchvision                0.26.0+cu128

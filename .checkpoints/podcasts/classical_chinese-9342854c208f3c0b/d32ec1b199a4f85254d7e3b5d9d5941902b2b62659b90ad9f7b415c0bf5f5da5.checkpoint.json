@@ -1,0 +1,26 @@
+{
+  "sha256": "e7266b7e90548e9b5138b11c33674abcbb08f391ff9532bf9bde7c37ac0d6da4",
+  "frames": 415800,
+  "identity": {
+    "context": {
+      "schema": 1,
+      "sample_rate": 24000,
+      "model": "hexgrad/Kokoro-82M",
+      "lang_code": "a",
+      "packages": {
+        "kokoro": "0.9.4",
+        "misaki": "0.9.4",
+        "torch": "2.11.0+cu128"
+      }
+    },
+    "turn": {
+      "segment": "A Shared Question",
+      "speaker": "daniel",
+      "voice": "am_michael",
+      "text": "And I'm Daniel. These works come from different traditions and settings, so we shouldn't flatten them into one message. But they do circle a practical question: how can a person meet a changing world without being ruled by fear, appetite, or short-term advantage?",
+      "speed": 1.04,
+      "pause_ms": 250
+    },
+    "voice_hash": null
+  }
+}

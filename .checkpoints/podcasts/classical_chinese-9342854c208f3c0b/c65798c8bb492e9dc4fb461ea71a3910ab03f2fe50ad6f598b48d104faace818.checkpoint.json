@@ -1,0 +1,26 @@
+{
+  "sha256": "1be031c3f7f610cbff884ca1e182186509e3aa7f10f8adae631d1c4052446bc8",
+  "frames": 482400,
+  "identity": {
+    "context": {
+      "schema": 1,
+      "sample_rate": 24000,
+      "model": "hexgrad/Kokoro-82M",
+      "lang_code": "a",
+      "packages": {
+        "kokoro": "0.9.4",
+        "misaki": "0.9.4",
+        "torch": "2.11.0+cu128"
+      }
+    },
+    "turn": {
+      "segment": "Stillness in Motion",
+      "speaker": "daniel",
+      "voice": "am_michael",
+      "text": "The Yin Fu Jing sounds more strategic. It watches cycles, consequences, and the interaction of heaven, earth, and humanity. Nature is still, yet transformations arise from it. So stillness isn't passivity; it's the stable attention needed to recognize timing and consequence.",
+      "speed": 1.04,
+      "pause_ms": 800
+    },
+    "voice_hash": null
+  }
+}

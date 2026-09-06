@@ -48,6 +48,7 @@ LAUNCHERS = (
     LauncherSpec("slides", "Slides", "Browse and present generated slide decks.", "slides_launcher.py", "slides"),
     LauncherSpec("datatables", "Data tables", "Filter and inspect extracted records.", "datatable_launcher.py", "datatables"),
     LauncherSpec("infographics", "Infographics", "Browse generated visual summaries.", "infographic_launcher.py", "infographics"),
+    LauncherSpec("podcasts", "Podcasts", "Play, read, and save generated podcast episodes.", "podcast_launcher.py", "podcasts"),
 )
 
 

@@ -1,0 +1,26 @@
+{
+  "sha256": "1fbc3e172123d16dadb1b3c165027df2e45829903867a80902f3161e4b7f82b3",
+  "frames": 428400,
+  "identity": {
+    "context": {
+      "schema": 1,
+      "sample_rate": 24000,
+      "model": "hexgrad/Kokoro-82M",
+      "lang_code": "a",
+      "packages": {
+        "kokoro": "0.9.4",
+        "misaki": "0.9.4",
+        "torch": "2.11.0+cu128"
+      }
+    },
+    "turn": {
+      "segment": "Stillness in Motion",
+      "speaker": "maya",
+      "voice": "af_heart",
+      "text": "A useful modern example is conflict. Reacting at the first flash of anger feels active, but it may be mechanical. A still moment lets us ask what conditions produced the conflict, what our own part is, and which response will reduce rather than multiply harm.",
+      "speed": 0.96,
+      "pause_ms": 250
+    },
+    "voice_hash": null
+  }
+}
