@@ -4,7 +4,7 @@ import json
 import logging
 import math
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import sqlite3
 from dataclasses import dataclass, asdict
 import hashlib

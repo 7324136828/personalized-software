@@ -1,4 +1,4 @@
-"""Shared tkinter shell for the generated-content launchers.
+"""Shared tkinter shell and entry point for generated-content launchers.
 
 The flashcard, report, and slide launchers all present the same frame: a folder
 of JSON documents on the left, a details pane beneath it, a content area on the
@@ -6,16 +6,49 @@ right, and a status bar. ``LibraryApp`` supplies that frame; a subclass supplies
 the loading, description, and rendering.
 
 Standard library only.
+
+Run this file directly to open a hub for every desktop viewer::
+
+    python python/launcher_common.py
+    python python/launcher_common.py --list
+    python python/launcher_common.py --launch qanda
 """
 
+import argparse
 import json
+import subprocess
+import sys
 import tkinter as tk
+from dataclasses import dataclass
 from pathlib import Path
 from tkinter import font as tkfont
 from tkinter import messagebox, ttk
 from typing import Any, List, Optional, Sequence, Tuple
 
 Chunk = Tuple[str, Optional[str]]  # (text, tag)
+
+
+@dataclass(frozen=True)
+class LauncherSpec:
+    """Metadata for one desktop content viewer."""
+
+    key: str
+    label: str
+    description: str
+    script: str
+    data_folder: str
+
+
+LAUNCHERS = (
+    LauncherSpec("quizzes", "Quizzes", "Take scored multiple-choice quizzes.", "quiz_launcher.py", "quizzes"),
+    LauncherSpec("qanda", "Q&A", "Write, autosave, and export free-text responses.", "qanda_launcher.py", "qandas"),
+    LauncherSpec("flashcards", "Flashcards", "Review generated study cards.", "flashcards_launcher.py", "flashcards"),
+    LauncherSpec("mindmaps", "Mind maps", "Explore hierarchical concept maps.", "mindmap_viewer.py", "mindmaps"),
+    LauncherSpec("reports", "Reports", "Read reports, claims, and citations.", "reports_launcher.py", "reports"),
+    LauncherSpec("slides", "Slides", "Browse and present generated slide decks.", "slides_launcher.py", "slides"),
+    LauncherSpec("datatables", "Data tables", "Filter and inspect extracted records.", "datatable_launcher.py", "datatables"),
+    LauncherSpec("infographics", "Infographics", "Browse generated visual summaries.", "infographic_launcher.py", "infographics"),
+)
 
 
 def load_documents(folder: Path, loader) -> Tuple[List[Any], List[str]]:
@@ -209,3 +242,137 @@ class LibraryApp(tk.Tk):
 
     def set_hint(self, text: str) -> None:
         self.hint_label.config(text=text)
+
+
+def project_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def launcher_command(spec: LauncherSpec) -> List[str]:
+    return [sys.executable, str(Path(__file__).resolve().parent / spec.script)]
+
+
+def launcher_available(spec: LauncherSpec) -> bool:
+    root = project_root()
+    return (root / "python" / spec.script).is_file() and (root / "output" / spec.data_folder).is_dir()
+
+
+def run_launcher(spec: LauncherSpec, wait: bool = False) -> int:
+    """Start one viewer using the same interpreter as this process."""
+    script = project_root() / "python" / spec.script
+    data_folder = project_root() / "output" / spec.data_folder
+    if not script.is_file():
+        raise FileNotFoundError(f"Launcher script not found: {script}")
+    if not data_folder.is_dir():
+        raise FileNotFoundError(f"Content folder not found: {data_folder}")
+    if wait:
+        return subprocess.call(launcher_command(spec), cwd=project_root())
+    subprocess.Popen(launcher_command(spec), cwd=project_root())
+    return 0
+
+
+class LauncherHub(tk.Tk):
+    """Small home screen for opening any generated-content desktop viewer."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.title("Learning Content Viewers")
+        self.geometry("820x610")
+        self.minsize(680, 500)
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
+
+        header = ttk.Frame(self, padding=(24, 20, 24, 12))
+        header.grid(row=0, column=0, sticky="ew")
+        ttk.Label(
+            header,
+            text="Learning Content Viewers",
+            font=("Segoe UI", 18, "bold"),
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            header,
+            text="Choose a viewer for content currently available in output/.",
+            foreground="#6b7580",
+        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
+
+        grid = ttk.Frame(self, padding=(24, 8, 24, 18))
+        grid.grid(row=1, column=0, sticky="nsew")
+        grid.columnconfigure(0, weight=1)
+        grid.columnconfigure(1, weight=1)
+        for row in range((len(LAUNCHERS) + 1) // 2):
+            grid.rowconfigure(row, weight=1)
+
+        for index, spec in enumerate(LAUNCHERS):
+            row, column = divmod(index, 2)
+            card = ttk.LabelFrame(grid, text=spec.label, padding=(14, 10))
+            card.grid(
+                row=row,
+                column=column,
+                sticky="nsew",
+                padx=(0, 8) if column == 0 else (8, 0),
+                pady=8,
+            )
+            card.columnconfigure(0, weight=1)
+            ttk.Label(card, text=spec.description, wraplength=300).grid(
+                row=0, column=0, sticky="nw"
+            )
+            available = launcher_available(spec)
+            button = ttk.Button(
+                card,
+                text=f"Open {spec.label}",
+                command=lambda selected=spec: self._open(selected),
+            )
+            button.grid(row=1, column=0, sticky="w", pady=(10, 0))
+            if not available:
+                button.configure(state="disabled")
+                ttk.Label(
+                    card,
+                    text=f"No output/{spec.data_folder} folder",
+                    foreground="#8a949e",
+                ).grid(row=2, column=0, sticky="w", pady=(5, 0))
+
+        footer = ttk.Frame(self, padding=(24, 0, 24, 18))
+        footer.grid(row=2, column=0, sticky="ew")
+        footer.columnconfigure(0, weight=1)
+        self.status = ttk.Label(footer, text=f"Python: {sys.executable}", foreground="#6b7580")
+        self.status.grid(row=0, column=0, sticky="w")
+        ttk.Button(footer, text="Close", command=self.destroy).grid(row=0, column=1, sticky="e")
+
+    def _open(self, spec: LauncherSpec) -> None:
+        try:
+            run_launcher(spec)
+        except (OSError, FileNotFoundError) as error:
+            messagebox.showerror(f"Could not open {spec.label}", str(error), parent=self)
+            self.status.configure(text=f"Failed to open {spec.label}")
+            return
+        self.status.configure(text=f"Opened {spec.label}")
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description="Open the generated-content desktop viewers")
+    parser.add_argument("--list", action="store_true", help="list available viewers and exit")
+    parser.add_argument(
+        "--launch",
+        choices=[spec.key for spec in LAUNCHERS],
+        help="open one viewer directly instead of showing the hub",
+    )
+    args = parser.parse_args(argv)
+
+    if args.list:
+        for spec in LAUNCHERS:
+            state = "available" if launcher_available(spec) else "missing content folder"
+            print(f"{spec.key:14} {state:22} {spec.script}")
+        return 0
+    if args.launch:
+        spec = next(item for item in LAUNCHERS if item.key == args.launch)
+        try:
+            return run_launcher(spec, wait=True)
+        except FileNotFoundError as error:
+            parser.error(str(error))
+
+    LauncherHub().mainloop()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

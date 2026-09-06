@@ -38,6 +38,26 @@ No `npm run sync` step is needed. See `react/README.md` for details.
 - **OpenAI**: Cloud-based, high quality, structured output support (requires API key)
 - **Claude**: Advanced reasoning, long context, security-focused (requires API key)
 
+## Screenshots
+
+Click any screenshot to open the full-resolution image.
+
+| Quizzes | Free-text Q&A |
+| --- | --- |
+| [![Quiz viewer](images/quizzes.png)](images/quizzes.png) | [![Free-text Q&A viewer](images/q%26A.png)](images/q%26A.png) |
+
+| Flashcards | Mind maps |
+| --- | --- |
+| [![Flashcard viewer](images/flashcard.png)](images/flashcard.png) | [![Mind map viewer](images/mind-maps.png)](images/mind-maps.png) |
+
+| Reports | Data tables |
+| --- | --- |
+| [![Report viewer](images/reports.png)](images/reports.png) | [![Data table viewer](images/data-table.png)](images/data-table.png) |
+
+| Infographics |
+| --- |
+| [![Infographic viewer](images/infographics.png)](images/infographics.png) |
+
 ## Architecture
 
 The system follows a SOURCE → RAG → OLLAMA → JSON → RENDERER architecture:
@@ -116,13 +136,33 @@ You can use different providers for different tasks. Each command accepts a `--p
 
 ## Installation
 
-```bash
-# Install Python dependencies
-pip install -r requirements.txt
+With Python 3.11+ installed, the setup command creates `.venv`, installs both
+Python and React dependencies, and runs the backend tests plus React checks.
+`setup.bat` is a one-line wrapper around `setup_environment.py`:
 
-# For audio generation, ensure Kokoro dependencies are installed
-pip install kokoro numpy imageio-ffmpeg
+```bat
+setup.bat
 ```
+
+The cross-platform equivalent is `python setup_environment.py`.
+
+Use `setup.bat --skip-verify` when you only want to install or refresh
+dependencies. The equivalent manual setup is:
+
+```bash
+# Create and activate a local Python environment (Windows)
+python -m venv .venv
+.venv\Scripts\activate
+
+# Install Python and React dependencies
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+cd react
+npm install
+```
+
+On macOS or Linux, activate with `source .venv/bin/activate`. `run.bat` and the
+React npm scripts automatically prefer the repository `.venv` when it exists.
 
 The requirements file includes:
 - Ollama support: `requests`
@@ -529,10 +569,20 @@ python python/ollama_learning/datatable.py \
 
 ## Interactive GUIs
 
-Flashcards, quizzes, and slide decks include interactive GUI viewers:
+Open the desktop viewer hub and choose any available content type:
+
+```bash
+python python/launcher_common.py
+```
+
+Use `--list` to inspect availability without opening a window, or
+`--launch qanda` (and the other listed names) to open a viewer directly.
+
+Flashcards, quizzes, Q&A sets, and slide decks include interactive controls:
 
 - **Flashcards**: Space to flip, arrows to navigate
 - **Quizzes**: Multiple choice with immediate feedback
+- **Q&A**: Free-text responses with temporary autosave and JSON export
 - **Slides**: Arrow keys to navigate, space for notes
 
 Use the `--interactive` flag to launch the GUI.
