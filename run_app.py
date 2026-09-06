@@ -39,6 +39,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("command", nargs="?", choices=["serve", "dev", "build"], default="serve")
     parser.add_argument("--port", type=int, help="frontend port; defaults to 4173 or 5174 in dev")
     parser.add_argument("--no-open", action="store_true", help="do not open a browser")
+    parser.add_argument(
+        "--host",
+        help="interface to bind (use 0.0.0.0 to reach the app from other devices)",
+    )
+    parser.add_argument(
+        "--lan",
+        action="store_true",
+        help="shortcut for --host 0.0.0.0: serve to other devices on this network",
+    )
     return parser.parse_args(argv)
 
 
@@ -48,6 +57,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         arguments[0] = "--help"
     args = parse_args(arguments)
     port = args.port or (5174 if args.command == "dev" else 4173)
+    host = "0.0.0.0" if args.lan and not args.host else args.host
+    host_args = ["--host", host] if host else []
 
     executable("node")
     npm = executable("npm")
@@ -71,6 +82,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "--dev",
             "--frontend-port",
             str(port),
+            *host_args,
         ]
         if not args.no_open:
             command.append("--open")
@@ -85,7 +97,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"[run] Build ready at {REACT_DIR / 'dist'}")
         return 0
 
-    command = [backend_python, BACKEND, "--port", str(port)]
+    command = [backend_python, BACKEND, "--port", str(port), *host_args]
     if not args.no_open:
         command.append("--open")
     return run(command)

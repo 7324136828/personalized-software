@@ -60,9 +60,32 @@ export async function fetchManifest(): Promise<Manifest> {
   return (await response.json()) as Manifest;
 }
 
+/** Browsers cap parallel requests per host (~6); the local backend is happier
+ * with a small pool too. Fan-out beyond this queued the tail requests long
+ * enough that some rejected with "Failed to fetch". */
+const MAX_PARALLEL_FETCHES = 6;
+
+/** Fetch a document, retrying once on a transient network failure (a rejected
+ * fetch, not an HTTP error status). */
+async function fetchDocument(url: string): Promise<Record<string, unknown>> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return (await response.json()) as Record<string, unknown>;
+    } catch (error) {
+      const networkFailure = error instanceof TypeError;
+      if (!networkFailure || attempt >= 1) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+  }
+}
+
 /**
  * Port of launcher_common.load_documents: load every document of a kind,
- * returning what parsed plus a list of per-file errors.
+ * returning what parsed plus a list of per-file errors. Requests run through a
+ * bounded pool so the number of documents never overruns the browser's
+ * per-host connection limit.
  */
 export async function loadKind<T>(
   kind: Kind,
@@ -73,20 +96,26 @@ export async function loadKind<T>(
   const documents: Loaded<T>[] = [];
   const errors: string[] = [];
 
-  await Promise.all(
-    entries.map(async (entry) => {
+  let cursor = 0;
+  async function worker(): Promise<void> {
+    while (cursor < entries.length) {
+      const entry = entries[cursor++];
       try {
-        const response = await fetch(dataUrl(kind, entry.file));
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const raw = (await response.json()) as Record<string, unknown>;
+        const raw = await fetchDocument(dataUrl(kind, entry.file));
         documents.push({ entry, doc: parse(raw, entry.file) });
       } catch (error) {
         errors.push(`${entry.file}: ${(error as Error).message}`);
       }
-    }),
-  );
+    }
+  }
 
-  // Promise.all resolves out of order; restore the manifest's sorted order.
+  const workers = Array.from(
+    { length: Math.min(MAX_PARALLEL_FETCHES, entries.length) },
+    () => worker(),
+  );
+  await Promise.all(workers);
+
+  // Workers resolve out of order; restore the manifest's sorted order.
   documents.sort(
     (a, b) =>
       entries.indexOf(a.entry) - entries.indexOf(b.entry),

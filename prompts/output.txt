@@ -2,3 +2,14 @@ based on the skills, without calling other tools (openai, claude, ollama), can y
 datatables, flashcards, infographics, mindmaps, podcasts, qandas, quizzes, reports, slides
 for dataset <dataset-name> under output folder? You can follow the specification in skills folder?
 Make sure that podcast is at least 30 minutes long, you can split podcasts into multiple podcast episode if necessary?
+Make sure only output these files type 
+- CSV (.csv)
+- HTML (.html)
+- JSON (.json)
+- Markdown (.md)
+- Mermaid diagrams (.mmd)
+- MP3 audio (.mp3)
+- SVG images (.svg)
+- Text (.txt)
+- WAV audio (.wav)
+Do not generate any python script at the end of the process or change any existing code but you can generate intermediate python scripts under the tmp folder that will be deleted manually after processing?
