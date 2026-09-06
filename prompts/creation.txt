@@ -1,0 +1,4 @@
+Can you add another usage of Q&A which will allow the user to be prompted with questions and user will reply with text and save the result of Q&A locally temporarily 
+(you are allowed to create a python_backend to save the responses into the temporary folder) 
+at the end of Q&A or during the Q&A user is allowed to retrieve the data via the python_backend and save locally? 
+Also rather than running npm run sync to sync the data our react application can also benefit from the python backend by getting the json and other data?
