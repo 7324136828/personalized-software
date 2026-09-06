@@ -6,7 +6,7 @@ import "./styles.css";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    {/* HashRouter so the built app also works when opened from the file system. */}
+    {/* Hash routing keeps every view on the backend's single index page. */}
     <HashRouter>
       <App />
     </HashRouter>

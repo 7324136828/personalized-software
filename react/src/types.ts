@@ -6,6 +6,7 @@
 
 export type Kind =
   | "quizzes"
+  | "qandas"
   | "mindmaps"
   | "flashcards"
   | "reports"
@@ -49,6 +50,21 @@ export interface Quiz {
   title: string;
   description: string;
   questions: QuizQuestion[];
+}
+
+// -- Free-text Q&A ---------------------------------------------------------
+
+export interface QAPrompt {
+  id: string;
+  question: string;
+  placeholder: string;
+  required: boolean;
+}
+
+export interface QASet {
+  title: string;
+  description: string;
+  questions: QAPrompt[];
 }
 
 // -- Mind map --------------------------------------------------------------
