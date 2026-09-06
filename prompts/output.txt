@@ -1,0 +1,3 @@
+based on the skills, without calling other tools (openai, claude, ollama), can you create 
+datatables, flashcards, infographics, mindmaps, podcasts, qandas, quizzes, reports, slides
+for dataset <dataset-name> under output folder? You can follow the specification in skills folder?

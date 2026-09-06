@@ -17,6 +17,19 @@ VENV_DIR = ROOT / ".venv"
 VENV_PYTHON = VENV_DIR / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 
 
+CUDA_TORCH_INDEX = 'https://download.pytorch.org/whl/cu128'
+CUDA_TORCH_VERSION = '2.11.0+cu128'
+CUDA_TORCHAUDIO_VERSION = '2.11.0+cu128'
+CUDA_TORCHVISION_VERSION = '0.26.0+cu128'
+CUDA_RUNTIME_VERSION = '12.8'
+CUDA_TORCH_PACKAGES = (
+    f'torch=={CUDA_TORCH_VERSION}',
+    f'torchaudio=={CUDA_TORCHAUDIO_VERSION}',
+    f'torchvision=={CUDA_TORCHVISION_VERSION}',
+)
+RTX_NAME = 'NVIDIA GeForce RTX'
+
+
 class SetupError(RuntimeError):
     """Raised when a setup step cannot be completed."""
 
@@ -39,6 +52,86 @@ def run(command: Sequence[str | Path], *, cwd: Path = ROOT, quiet: bool = False)
     )
     if result.returncode:
         raise SetupError(f"Command failed with exit code {result.returncode}: {' '.join(rendered)}")
+
+
+def venv_is_healthy() -> bool:
+    if VENV_PYTHON.is_file() is False:
+        return False
+    try:
+        result = subprocess.run(
+            [str(VENV_PYTHON), '--version'],
+            cwd=ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        return False
+    return result.returncode == 0
+
+
+def nvidia_gpu_names() -> list[str]:
+    nvidia_smi = shutil.which('nvidia-smi')
+    if nvidia_smi is None:
+        return []
+    result = subprocess.run(
+        [nvidia_smi, '--query-gpu=name', '--format=csv,noheader'],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode:
+        print('[setup] nvidia-smi could not query installed GPUs; using default PyTorch packages.')
+        return []
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def install_cuda_pytorch(python_executable: Path) -> None:
+    gpu_names = nvidia_gpu_names()
+    rtx_names = [name for name in gpu_names if RTX_NAME.casefold() in name.casefold()]
+    if not rtx_names:
+        detected = ', '.join(gpu_names) if gpu_names else 'none'
+        print(f'[setup] No {RTX_NAME} GPU detected ({detected}); keeping the default PyTorch build.')
+        return
+
+    rtx_display = ', '.join(rtx_names)
+    print(f'[setup] RTX GPU detected: {rtx_display}')
+    print('[setup] Replacing PyTorch packages with the requested CUDA 12.8 builds.')
+    run(
+        [
+            python_executable,
+            '-m',
+            'pip',
+            'uninstall',
+            '--yes',
+            'torch',
+            'torchaudio',
+            'torchvision',
+        ]
+    )
+    run(
+        [
+            python_executable,
+            '-m',
+            'pip',
+            'install',
+            '--index-url',
+            CUDA_TORCH_INDEX,
+            *CUDA_TORCH_PACKAGES,
+        ]
+    )
+    verify = (
+        'import torch, torchaudio, torchvision; '
+        f'assert torch.__version__ == {CUDA_TORCH_VERSION!r}; '
+        f'assert torchaudio.__version__ == {CUDA_TORCHAUDIO_VERSION!r}; '
+        f'assert torchvision.__version__ == {CUDA_TORCHVISION_VERSION!r}; '
+        f'assert torch.version.cuda == {CUDA_RUNTIME_VERSION!r}; '
+        'assert torch.cuda.is_available(); '
+        'print(torch.__version__, torchaudio.__version__, torchvision.__version__, '
+        'torch.version.cuda, torch.cuda.get_device_name(0))'
+    )
+    run([python_executable, '-c', verify])
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -68,7 +161,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"[setup] Python {sys.version.split()[0]}")
     print(f"[setup] Node {node_version}")
 
-    if not VENV_PYTHON.is_file():
+    if not venv_is_healthy():
         print(f"[setup] Creating virtual environment at {VENV_DIR}")
         run([sys.executable, "-m", "venv", VENV_DIR])
     else:
@@ -78,6 +171,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     print("[setup] Installing Python dependencies; audio/ML packages may take several minutes.")
     run([VENV_PYTHON, "-m", "pip", "install", "-r", ROOT / "requirements.txt"])
     run([npm, "install"], cwd=REACT_DIR)
+
+    install_cuda_pytorch(VENV_PYTHON)
 
     if not args.skip_verify:
         run([VENV_PYTHON, "-m", "pip", "check"])
