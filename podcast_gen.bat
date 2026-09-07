@@ -1,1 +1,0 @@
-python python/podcasts.py --device cuda --input .\output\podcasts

@@ -291,13 +291,13 @@ class InfographicApp(LibraryApp):
         tk.Frame(self.scroll.inner, background=PAGE_BG, height=18).pack(fill="x")
         self.scroll._on_inner()
 
-        html = doc.html_path()
+        html = doc.html_name()
         self.open_button.configure(state="normal" if html else "disabled")
-        self.wire_button.configure(state="normal" if doc.wireframe_path() else "disabled")
+        self.wire_button.configure(state="normal" if doc.wireframe_name() else "disabled")
         panel_count = len(doc.panel_names()) or 1
         self.set_status(
             f"{panel_count} panel(s) · {len(sections)} of {len(doc.sections)} sections shown"
-            + (f"   ·   exports: {html.name}" if html else "   ·   no HTML export yet")
+            + (f"   ·   exports: {html}" if html else "   ·   no HTML export yet")
         )
 
     def _panels(self, sections: List[Section]):

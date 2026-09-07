@@ -152,6 +152,20 @@ class PodcastApp(LibraryApp):
         ttk.Button(toolbar, text="Save script as...", command=self._save_script).grid(
             row=0, column=4, padx=(8, 0)
         )
+        ttk.Button(toolbar, text="Refresh Podcasts", command=self._refresh_podcasts).grid(
+            row=0, column=5, padx=(8, 0)
+        )
+
+    def _refresh_podcasts(self) -> None:
+        """Ask the backend to (re)generate podcasts, then reload the library."""
+        try:
+            status, body = self.api.post("/api/generate_podcast")
+        except ContentAPIError as error:
+            messagebox.showerror("Refresh failed", str(error), parent=self)
+            return
+        message = body.get("status") or f"HTTP {status}"
+        self.set_status(f"Refresh Podcasts: {message}")
+        self.refresh()
 
     def build_content(self, parent: ttk.Frame) -> None:
         frame = ttk.Frame(parent)

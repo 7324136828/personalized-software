@@ -33,12 +33,19 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
+try:  # imported as ``backend.server`` (tests, package context)
+    from backend import podcast_render
+except ImportError:  # run directly: ``python python/backend/server.py``
+    import podcast_render
+
 
 # server.py lives at <repo>/python/backend/server.py
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "new_output"
 DEFAULT_STATIC_DIR = PROJECT_ROOT / "react" / "dist"
 DEFAULT_RESPONSE_DIR = Path(tempfile.gettempdir()) / "personalized-software" / "qa-sessions"
+PODCAST_CHECKPOINT_DIR = PROJECT_ROOT / ".checkpoints" / "podcasts"
+PODCAST_DEVICE = os.environ.get("PODCAST_DEVICE", "auto")
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
 
 KINDS: dict[str, tuple[str, ...]] = {
@@ -243,6 +250,65 @@ def list_sessions(response_dir: Path) -> list[dict[str, Any]]:
     return sorted(sessions, key=lambda item: item["updatedAt"], reverse=True)
 
 
+# --------------------------------------------------------------------------
+# Podcast generation (POST /api/generate_podcast)
+# --------------------------------------------------------------------------
+
+PODCAST_JOB_LOCK = threading.Lock()
+# One process-wide job at a time. ``state`` is "idle" | "running" | "done" | "error".
+podcast_job: dict[str, Any] = {
+    "state": "idle",
+    "startedAt": None,
+    "finishedAt": None,
+    "result": None,
+}
+
+
+def podcast_script_paths(output_dir: Path) -> list[Path]:
+    """Every podcast script JSON in the content tree (all subjects, plus legacy flat)."""
+    paths: list[Path] = []
+    for kind_dir in kind_dirs(output_dir, "podcasts"):
+        paths.extend(sorted(kind_dir.glob("*.json"), key=lambda item: item.name.lower()))
+    return paths
+
+
+def _run_podcast_job(episode_paths: list[Path]) -> None:
+    try:
+        result: dict[str, Any] = podcast_render.render_library(
+            episode_paths,
+            device=PODCAST_DEVICE,
+            checkpoint_dir=PODCAST_CHECKPOINT_DIR,
+        )
+        state = "done"
+    except Exception as error:  # noqa: BLE001 - report any failure back to the caller
+        result = {"error": str(error)}
+        state = "error"
+    with PODCAST_JOB_LOCK:
+        podcast_job["state"] = state
+        podcast_job["result"] = result
+        podcast_job["finishedAt"] = utc_now()
+
+
+def start_podcast_job(output_dir: Path) -> dict[str, Any]:
+    """Kick off podcast rendering in a background thread; return immediately."""
+    episode_paths = podcast_script_paths(output_dir)
+    with PODCAST_JOB_LOCK:
+        if podcast_job["state"] == "running":
+            return {"status": "already running", "startedAt": podcast_job["startedAt"]}
+        podcast_job.update(
+            state="running", startedAt=utc_now(), finishedAt=None, result=None
+        )
+    threading.Thread(
+        target=_run_podcast_job, args=(episode_paths,), daemon=True
+    ).start()
+    return {"status": "started", "podcasts": len(episode_paths)}
+
+
+def podcast_job_status() -> dict[str, Any]:
+    with PODCAST_JOB_LOCK:
+        return dict(podcast_job)
+
+
 class LearningRequestHandler(SimpleHTTPRequestHandler):
     """HTTP handler for API requests plus the built React application."""
 
@@ -286,6 +352,15 @@ class LearningRequestHandler(SimpleHTTPRequestHandler):
     def _error(self, status: HTTPStatus, message: str) -> None:
         self._json(status, {"error": message})
 
+    def _drain_body(self) -> None:
+        """Consume and discard a request body so keep-alive stays in sync."""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if 0 < length <= MAX_REQUEST_BYTES:
+            self.rfile.read(length)
+
     def _read_json(self) -> Any:
         raw_length = self.headers.get("Content-Length")
         if raw_length is None:
@@ -316,6 +391,9 @@ class LearningRequestHandler(SimpleHTTPRequestHandler):
             if path == "/api/qa/sessions":
                 self._json(HTTPStatus.OK, {"sessions": list_sessions(self.response_dir)})
                 return
+            if path == "/api/generate_podcast":
+                self._json(HTTPStatus.OK, podcast_job_status())
+                return
             match = re.fullmatch(r"/api/qa/sessions/([^/]+)(/download)?", path)
             if match:
                 session = read_session(self.response_dir, match.group(1))
@@ -333,6 +411,14 @@ class LearningRequestHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
         path = unquote(urlsplit(self.path).path)
+        if path == "/api/generate_podcast":
+            # The "Refresh Podcasts" buttons (React and desktop) call this to
+            # (re)synthesise audio for every podcast script JSON in the content
+            # tree. Rendering runs in a background thread; poll GET
+            # /api/generate_podcast for progress.
+            self._drain_body()
+            self._json(HTTPStatus.ACCEPTED, start_podcast_job(self.output_dir))
+            return
         if path != "/api/qa/sessions":
             self._error(HTTPStatus.NOT_FOUND, "API endpoint not found")
             return

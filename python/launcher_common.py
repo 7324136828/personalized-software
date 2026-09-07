@@ -109,6 +109,37 @@ class ContentAPI:
                 f"Start it first:  python run_app.py serve"
             ) from exc
 
+    def post(self, path: str, payload: Optional[dict] = None) -> Tuple[int, dict]:
+        """POST JSON to ``path`` and return ``(status_code, parsed_body)``.
+
+        An HTTP error status is returned rather than raised so callers can show
+        the backend's own message (the ``/api/generate_podcast`` placeholder, for
+        example, replies 501).
+        """
+        url = self.base_url + path
+        body = json.dumps(payload or {}).encode("utf-8")
+        request = urllib.request.Request(
+            url, data=body, method="POST", headers={"Content-Type": "application/json"}
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                raw = response.read()
+                status = response.status
+        except urllib.error.HTTPError as exc:
+            raw = exc.read()
+            status = exc.code
+        except (urllib.error.URLError, OSError) as exc:
+            reason = getattr(exc, "reason", exc)
+            raise ContentAPIError(
+                f"Cannot reach the content backend at {self.base_url} ({reason}).\n"
+                f"Start it first:  python run_app.py serve"
+            ) from exc
+        try:
+            parsed = json.loads(raw.decode("utf-8")) if raw else {}
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            parsed = {}
+        return status, parsed
+
     def check(self) -> None:
         """Confirm the backend is reachable; raise ContentAPIError otherwise."""
         self._get("/api/health")

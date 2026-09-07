@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from urllib.error import HTTPError
@@ -113,6 +114,41 @@ class BackendTest(unittest.TestCase):
         with self.assertRaises(HTTPError) as raised:
             self.request("/api/content/qandas/../../outside.json")
         self.assertIn(raised.exception.code, {400, 404})
+
+    def test_generate_podcast_starts_background_job(self) -> None:
+        from backend import server
+
+        seen: list[list[str]] = []
+        finished = threading.Event()
+
+        def fake_render_library(paths, **kwargs):
+            seen.append(sorted(Path(p).name for p in paths))
+            finished.set()
+            return {"generated": ["sample.mp3"], "skipped": [], "failed": []}
+
+        original = server.podcast_render.render_library
+        server.podcast_render.render_library = fake_render_library
+        server.podcast_job.update(state="idle", startedAt=None, finishedAt=None, result=None)
+        try:
+            status, body = self.request("/api/generate_podcast", "POST", {})
+            self.assertEqual(status, 202)
+            self.assertEqual(body["status"], "started")
+            self.assertEqual(body["podcasts"], 1)
+
+            self.assertTrue(finished.wait(timeout=5))
+            for _ in range(100):
+                _, state = self.request("/api/generate_podcast")
+                if state["state"] == "done":
+                    break
+                time.sleep(0.02)
+            self.assertEqual(state["state"], "done")
+            self.assertEqual(
+                state["result"], {"generated": ["sample.mp3"], "skipped": [], "failed": []}
+            )
+            self.assertEqual(seen, [["sample.json"]])
+        finally:
+            server.podcast_render.render_library = original
+            server.podcast_job.update(state="idle", startedAt=None, finishedAt=None, result=None)
 
 
 class NestedLayoutTest(unittest.TestCase):
