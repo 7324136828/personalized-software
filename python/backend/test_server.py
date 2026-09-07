@@ -10,7 +10,7 @@ from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from python_backend.server import create_server
+from backend.server import create_server
 
 
 class BackendTest(unittest.TestCase):
@@ -113,6 +113,57 @@ class BackendTest(unittest.TestCase):
         with self.assertRaises(HTTPError) as raised:
             self.request("/api/content/qandas/../../outside.json")
         self.assertIn(raised.exception.code, {400, 404})
+
+
+class NestedLayoutTest(unittest.TestCase):
+    """The per-subject layout: new_output/<subject>/<kind>/<file>."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        root = Path(self.temporary.name)
+        self.output = root / "new_output"
+        self.responses = root / "responses"
+        self.static = root / "dist"
+        self.static.mkdir(parents=True)
+        (self.static / "index.html").write_text("<h1>app</h1>", encoding="utf-8")
+
+        for subject, stem in (("classical_chinese", "heart_sutra"), ("getting_r", "intro_r")):
+            quizzes = self.output / subject / "quizzes"
+            quizzes.mkdir(parents=True)
+            (quizzes / f"quiz_{stem}.json").write_text(
+                json.dumps({"title": f"Quiz {stem}", "questions": []}),
+                encoding="utf-8",
+            )
+
+        self.server = create_server("127.0.0.1", 0, self.output, self.responses, self.static)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.base = f"http://127.0.0.1:{self.server.server_port}"
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=2)
+        self.temporary.cleanup()
+
+    def test_manifest_merges_every_subject(self) -> None:
+        with urlopen(self.base + "/api/content/manifest") as response:
+            manifest = json.loads(response.read())
+        quizzes = manifest["kinds"]["quizzes"]
+        self.assertEqual(
+            {entry["file"] for entry in quizzes},
+            {"quiz_heart_sutra.json", "quiz_intro_r.json"},
+        )
+        self.assertEqual(
+            {entry["subject"] for entry in quizzes},
+            {"classical_chinese", "getting_r"},
+        )
+
+    def test_serves_a_document_from_its_subject_folder(self) -> None:
+        with urlopen(self.base + "/api/content/quizzes/quiz_intro_r.json") as response:
+            self.assertEqual(response.status, 200)
+            body = json.loads(response.read())
+        self.assertEqual(body["title"], "Quiz intro_r")
 
 
 if __name__ == "__main__":

@@ -108,7 +108,7 @@ export function PodcastView() {
       toolbar={toolbar}
       status={episode ? `${episode.script.length} segments · ${turns} spoken turns · ${audioFile ? "audio ready" : "script only"}` : ""}
       hint="Listen in the browser or download the audio and JSON script"
-      emptyMessage="No podcasts found in output/podcasts."
+      emptyMessage="No podcasts found in new_output/*/podcasts."
     >
       {episode ? (
         <article className="scroll pad podcast">

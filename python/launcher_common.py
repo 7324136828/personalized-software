@@ -1,9 +1,13 @@
 """Shared tkinter shell and entry point for generated-content launchers.
 
-The flashcard, report, and slide launchers all present the same frame: a folder
+The flashcard, report, and slide launchers all present the same frame: a list
 of JSON documents on the left, a details pane beneath it, a content area on the
 right, and a status bar. ``LibraryApp`` supplies that frame; a subclass supplies
 the loading, description, and rendering.
+
+Documents are fetched from the local content backend (``python/backend/server.py``)
+over HTTP rather than read from the output folder, so every launcher needs that
+server running. Start it with ``python run_app.py serve`` (or ``dev``).
 
 Standard library only.
 
@@ -12,13 +16,19 @@ Run this file directly to open a hub for every desktop viewer::
     python python/launcher_common.py
     python python/launcher_common.py --list
     python python/launcher_common.py --launch qanda
+    python python/launcher_common.py --api-url http://127.0.0.1:8765
 """
 
 import argparse
 import json
+import os
 import subprocess
 import sys
+import tempfile
 import tkinter as tk
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from tkinter import font as tkfont
@@ -52,21 +62,6 @@ LAUNCHERS = (
 )
 
 
-def load_documents(folder: Path, loader) -> Tuple[List[Any], List[str]]:
-    """Load every *.json file in a folder with `loader`. Returns (docs, errors)."""
-    docs, errors = [], []
-    for path in sorted(folder.glob("*.json")):
-        try:
-            docs.append(loader(path))
-        except Exception as exc:  # one malformed file shouldn't kill the launcher
-            errors.append(f"{path.name}: {exc}")
-    return docs, errors
-
-
-def read_json(path: Path) -> dict:
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
 def require(data: dict, field: str, kind: type, where: str) -> Any:
     """Fetch a required field, raising a readable error if missing or mistyped."""
     if field not in data:
@@ -74,6 +69,102 @@ def require(data: dict, field: str, kind: type, where: str) -> Any:
     if not isinstance(data[field], kind):
         raise ValueError(f"{where}: field {field!r} must be {kind.__name__}")
     return data[field]
+
+
+# --------------------------------------------------------------------------
+# Content backend client
+# --------------------------------------------------------------------------
+
+DEFAULT_API_URL = os.environ.get("CONTENT_API_URL") or "http://127.0.0.1:4173"
+
+
+class ContentAPIError(RuntimeError):
+    """The content backend could not be reached or returned an error status."""
+
+
+class ContentAPI:
+    """Minimal read-only client for ``python/backend/server.py``.
+
+    Launchers pull their documents (and any side-car files) from the running
+    backend instead of reading the output folder directly. The backend merges
+    every subject under ``new_output/<subject>/<kind>/`` into one list per kind.
+    """
+
+    def __init__(self, base_url: str = DEFAULT_API_URL, timeout: float = 15.0) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
+        self._cache_dir: Optional[Path] = None
+
+    def _get(self, path: str) -> bytes:
+        url = self.base_url + path
+        try:
+            with urllib.request.urlopen(url, timeout=self.timeout) as response:
+                return response.read()
+        except urllib.error.HTTPError as exc:
+            raise ContentAPIError(f"{url} returned HTTP {exc.code}") from exc
+        except (urllib.error.URLError, OSError) as exc:
+            reason = getattr(exc, "reason", exc)
+            raise ContentAPIError(
+                f"Cannot reach the content backend at {self.base_url} ({reason}).\n"
+                f"Start it first:  python run_app.py serve"
+            ) from exc
+
+    def check(self) -> None:
+        """Confirm the backend is reachable; raise ContentAPIError otherwise."""
+        self._get("/api/health")
+
+    def manifest(self) -> dict:
+        return json.loads(self._get("/api/content/manifest").decode("utf-8"))
+
+    def entries(self, kind: str) -> List[dict]:
+        """Manifest rows for one kind (``quizzes``, ``reports`` …).
+
+        Each row has ``file``, ``stem``, ``title``, ``sidecars`` and ``subject``.
+        """
+        return list(self.manifest().get("kinds", {}).get(kind, []))
+
+    @staticmethod
+    def _encode(file: str) -> str:
+        return "/".join(urllib.parse.quote(part) for part in file.split("/"))
+
+    def document_bytes(self, kind: str, file: str) -> bytes:
+        return self._get(f"/api/content/{kind}/{self._encode(file)}")
+
+    def document_json(self, kind: str, file: str) -> dict:
+        return json.loads(self.document_bytes(kind, file).decode("utf-8"))
+
+    def download(self, kind: str, file: str) -> Path:
+        """Fetch a file into a private temp cache and return its local path.
+
+        For side-cars the OS needs as real files: podcast audio and the
+        infographic HTML/SVG exports and their referenced assets.
+        """
+        if self._cache_dir is None:
+            self._cache_dir = Path(tempfile.mkdtemp(prefix="content-cache-"))
+        target = self._cache_dir / kind / file
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(self.document_bytes(kind, file))
+        return target
+
+
+def add_api_argument(parser: argparse.ArgumentParser) -> None:
+    """Add the shared ``--api-url`` option to a launcher's argument parser."""
+    parser.add_argument(
+        "--api-url",
+        default=DEFAULT_API_URL,
+        metavar="URL",
+        help=f"Base URL of the content backend (default: {DEFAULT_API_URL})",
+    )
+
+
+def connect_api(api_url: str) -> ContentAPI:
+    """Return a ready :class:`ContentAPI`, or exit with a readable message."""
+    api = ContentAPI(api_url)
+    try:
+        api.check()
+    except ContentAPIError as exc:
+        raise SystemExit(str(exc))
+    return api
 
 
 class RichText(tk.Text):
@@ -138,9 +229,10 @@ class LibraryApp(tk.Tk):
     list_width = 32
     details_height = 12
 
-    def __init__(self, folder: Path):
+    def __init__(self, api: ContentAPI, kind: str):
         super().__init__()
-        self.folder = folder
+        self.api = api
+        self.kind = kind
         self.docs: List[Any] = []
 
         self.title(self.window_title)
@@ -154,7 +246,12 @@ class LibraryApp(tk.Tk):
 
     # -- overridable hooks -------------------------------------------------
 
-    def load_one(self, path: Path) -> Any:
+    def load_one(self, data: dict, entry: dict) -> Any:
+        """Build one document from its parsed JSON and its manifest row.
+
+        ``entry`` carries ``file``, ``stem``, ``title``, ``sidecars`` and
+        ``subject``.
+        """
         raise NotImplementedError
 
     def title_of(self, doc: Any) -> str:
@@ -213,7 +310,22 @@ class LibraryApp(tk.Tk):
     # -- data --------------------------------------------------------------
 
     def refresh(self) -> None:
-        self.docs, errors = load_documents(self.folder, self.load_one)
+        self.docs, errors = [], []
+        try:
+            entries = self.api.entries(self.kind)
+        except ContentAPIError as exc:
+            self.listbox.delete(0, "end")
+            self.details.set_chunks([(f"{exc}\n", "dim")])
+            self.set_status("Backend unavailable")
+            messagebox.showerror("Content backend unavailable", str(exc), parent=self)
+            return
+        for entry in entries:
+            file = entry.get("file", "?")
+            try:
+                data = self.api.document_json(self.kind, file)
+                self.docs.append(self.load_one(data, entry))
+            except (ContentAPIError, ValueError, KeyError, TypeError) as exc:
+                errors.append(f"{file}: {exc}")
         self.listbox.delete(0, "end")
         for doc in self.docs:
             self.listbox.insert("end", self.title_of(doc))
@@ -222,7 +334,9 @@ class LibraryApp(tk.Tk):
             self.listbox.selection_set(0)
             self._select()
         else:
-            self.details.set_chunks([(f"No documents found in {self.folder}\n", "dim")])
+            self.details.set_chunks(
+                [(f"No {self.kind} available from {self.api.base_url}\n", "dim")]
+            )
             self.set_status("")
         if errors:
             messagebox.showwarning("Some documents failed to load", "\n".join(errors), parent=self)
@@ -249,34 +363,44 @@ def project_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-def launcher_command(spec: LauncherSpec) -> List[str]:
-    return [sys.executable, str(Path(__file__).resolve().parent / spec.script)]
+def launcher_command(spec: LauncherSpec, api_url: str) -> List[str]:
+    return [
+        sys.executable,
+        str(Path(__file__).resolve().parent / spec.script),
+        "--api-url",
+        api_url,
+    ]
 
 
-def launcher_available(spec: LauncherSpec) -> bool:
-    root = project_root()
-    return (root / "python" / spec.script).is_file() and (root / "output" / spec.data_folder).is_dir()
+def available_kinds(api_url: str) -> Tuple[set, Optional[str]]:
+    """Kinds the backend currently has content for, plus an error string if down."""
+    try:
+        manifest = ContentAPI(api_url).manifest()
+    except ContentAPIError as exc:
+        return set(), str(exc)
+    kinds = manifest.get("kinds", {})
+    return {name for name, rows in kinds.items() if rows}, None
 
 
-def run_launcher(spec: LauncherSpec, wait: bool = False) -> int:
+def run_launcher(spec: LauncherSpec, api_url: str, wait: bool = False) -> int:
     """Start one viewer using the same interpreter as this process."""
     script = project_root() / "python" / spec.script
-    data_folder = project_root() / "output" / spec.data_folder
     if not script.is_file():
         raise FileNotFoundError(f"Launcher script not found: {script}")
-    if not data_folder.is_dir():
-        raise FileNotFoundError(f"Content folder not found: {data_folder}")
     if wait:
-        return subprocess.call(launcher_command(spec), cwd=project_root())
-    subprocess.Popen(launcher_command(spec), cwd=project_root())
+        return subprocess.call(launcher_command(spec, api_url), cwd=project_root())
+    subprocess.Popen(launcher_command(spec, api_url), cwd=project_root())
     return 0
 
 
 class LauncherHub(tk.Tk):
     """Small home screen for opening any generated-content desktop viewer."""
 
-    def __init__(self) -> None:
+    def __init__(self, api_url: str = DEFAULT_API_URL) -> None:
         super().__init__()
+        self.api_url = api_url
+        self.available, self.error = available_kinds(api_url)
+
         self.title("Learning Content Viewers")
         self.geometry("820x610")
         self.minsize(680, 500)
@@ -290,10 +414,17 @@ class LauncherHub(tk.Tk):
             text="Learning Content Viewers",
             font=("Segoe UI", 18, "bold"),
         ).grid(row=0, column=0, sticky="w")
+        subtitle = (
+            self.error
+            if self.error
+            else f"Content served by the backend at {api_url}."
+        )
         ttk.Label(
             header,
-            text="Choose a viewer for content currently available in output/.",
-            foreground="#6b7580",
+            text=subtitle,
+            foreground="#b42318" if self.error else "#6b7580",
+            wraplength=760,
+            justify="left",
         ).grid(row=1, column=0, sticky="w", pady=(4, 0))
 
         grid = ttk.Frame(self, padding=(24, 8, 24, 18))
@@ -317,7 +448,7 @@ class LauncherHub(tk.Tk):
             ttk.Label(card, text=spec.description, wraplength=300).grid(
                 row=0, column=0, sticky="nw"
             )
-            available = launcher_available(spec)
+            available = (not self.error) and spec.data_folder in self.available
             button = ttk.Button(
                 card,
                 text=f"Open {spec.label}",
@@ -328,7 +459,7 @@ class LauncherHub(tk.Tk):
                 button.configure(state="disabled")
                 ttk.Label(
                     card,
-                    text=f"No output/{spec.data_folder} folder",
+                    text="Backend offline" if self.error else f"No {spec.label.lower()} on the server",
                     foreground="#8a949e",
                 ).grid(row=2, column=0, sticky="w", pady=(5, 0))
 
@@ -341,7 +472,7 @@ class LauncherHub(tk.Tk):
 
     def _open(self, spec: LauncherSpec) -> None:
         try:
-            run_launcher(spec)
+            run_launcher(spec, self.api_url)
         except (OSError, FileNotFoundError) as error:
             messagebox.showerror(f"Could not open {spec.label}", str(error), parent=self)
             self.status.configure(text=f"Failed to open {spec.label}")
@@ -357,21 +488,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         choices=[spec.key for spec in LAUNCHERS],
         help="open one viewer directly instead of showing the hub",
     )
+    add_api_argument(parser)
     args = parser.parse_args(argv)
 
     if args.list:
+        available, error = available_kinds(args.api_url)
+        if error:
+            print(error, file=sys.stderr)
         for spec in LAUNCHERS:
-            state = "available" if launcher_available(spec) else "missing content folder"
-            print(f"{spec.key:14} {state:22} {spec.script}")
+            state = "available" if spec.data_folder in available else "no content"
+            print(f"{spec.key:14} {state:16} {spec.script}")
         return 0
     if args.launch:
         spec = next(item for item in LAUNCHERS if item.key == args.launch)
         try:
-            return run_launcher(spec, wait=True)
+            return run_launcher(spec, args.api_url, wait=True)
         except FileNotFoundError as error:
             parser.error(str(error))
 
-    LauncherHub().mainloop()
+    LauncherHub(args.api_url).mainloop()
     return 0
 
 

@@ -8,7 +8,7 @@ stat cards, drawn bar charts, numbered flows, comparison pairs, and pull quotes.
 Standard library only.
 
     python python/infographic_launcher.py
-    python python/infographic_launcher.py --infographic-dir output/infographics
+    python python/infographic_launcher.py --api-url http://127.0.0.1:8765
 """
 
 import argparse
@@ -16,11 +16,18 @@ import re
 import tkinter as tk
 import webbrowser
 from dataclasses import dataclass, field
-from pathlib import Path
 from tkinter import messagebox, ttk
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from launcher_common import Chunk, LibraryApp, RichText, read_json, require
+from launcher_common import (
+    Chunk,
+    ContentAPI,
+    ContentAPIError,
+    LibraryApp,
+    add_api_argument,
+    connect_api,
+    require,
+)
 
 SECTION_TYPES = ("stat", "flow", "chart", "quote", "comparison", "svg")
 
@@ -85,12 +92,12 @@ class Graphic:
     title: str
     sections: List[Section]
     subtitle: Optional[str] = None
-    path: Optional[Path] = None
+    file: Optional[str] = None
+    sidecars: List[str] = field(default_factory=list)
 
     @classmethod
-    def load(cls, path: Path) -> "Graphic":
-        data = read_json(path)
-        where = path.name
+    def from_document(cls, data: dict, entry: dict) -> "Graphic":
+        where = entry.get("file", "infographic")
         sections = require(data, "sections", list, where)
         if not sections:
             raise ValueError(f"{where}: infographic has no sections")
@@ -99,7 +106,8 @@ class Graphic:
             sections=[Section.from_dict(s, f"{where} section {i + 1}")
                       for i, s in enumerate(sections)],
             subtitle=data.get("subtitle"),
-            path=path,
+            file=entry.get("file"),
+            sidecars=list(entry.get("sidecars", [])),
         )
 
     def type_counts(self) -> Dict[str, int]:
@@ -108,26 +116,19 @@ class Graphic:
             counts[section.type] = counts.get(section.type, 0) + 1
         return counts
 
-    def _sibling(self, suffix: str) -> Optional[Path]:
-        if self.path is None:
-            return None
-        candidate = self.path.with_suffix(suffix)
-        return candidate if candidate.exists() else None
+    def _sidecar(self, suffix: str) -> Optional[str]:
+        """Name of the first side-car ending with ``suffix``, served by the backend."""
+        return next((name for name in self.sidecars if name.endswith(suffix)), None)
 
-    def html_path(self) -> Optional[Path]:
-        return self._sibling(".html")
+    def html_name(self) -> Optional[str]:
+        return self._sidecar(".html")
 
-    def svg_path(self) -> Optional[Path]:
-        return self._sibling(".svg")
+    def svg_name(self) -> Optional[str]:
+        return self._sidecar(".svg")
 
-    def wireframe_path(self) -> Optional[Path]:
-        """The pre-infographic, written alongside the spec as <name>.wireframe.txt."""
-        if self.path is None:
-            return None
-        candidate = self.path.with_suffix("").with_suffix(".wireframe.txt")
-        if not candidate.exists():
-            candidate = self.path.parent / f"{self.path.stem}.wireframe.txt"
-        return candidate if candidate.exists() else None
+    def wireframe_name(self) -> Optional[str]:
+        """The pre-infographic side-car, <name>.wireframe.txt."""
+        return self._sidecar(".wireframe.txt")
 
     def panel_names(self) -> List[str]:
         names: List[str] = []
@@ -181,24 +182,24 @@ class InfographicApp(LibraryApp):
     window_title = "Infographic Viewer"
     window_size = "1180x800"
 
-    def __init__(self, folder: Path):
+    def __init__(self, api: ContentAPI):
         self.cards: List[tk.Widget] = []
-        super().__init__(folder)
+        super().__init__(api, "infographics")
         self.set_hint("scroll to read · filter by section type · open the HTML export in a browser")
 
     # -- library hooks -----------------------------------------------------
 
-    def load_one(self, path: Path) -> Graphic:
-        return Graphic.load(path)
+    def load_one(self, data: dict, entry: dict) -> Graphic:
+        return Graphic.from_document(data, entry)
 
     def title_of(self, doc: Graphic) -> str:
         return doc.title
 
     def describe(self, doc: Graphic) -> Sequence[Chunk]:
         counts = ", ".join(f"{t}: {n}" for t, n in sorted(doc.type_counts().items()))
-        html = doc.html_path()
+        html = doc.html_name()
         panels = doc.panel_names()
-        wire, svg = doc.wireframe_path(), doc.svg_path()
+        wire, svg = doc.wireframe_name(), doc.svg_name()
         exports = ", ".join(n for n in ("html" if html else "", "svg" if svg else "") if n)
         chunks: List[Chunk] = [(doc.title + "\n", "h2")]
         if doc.subtitle:
@@ -208,7 +209,7 @@ class InfographicApp(LibraryApp):
             (f"Panels: {len(panels) or 1}\n", "dim"),
             (f"Sections: {len(doc.sections)}\n", "dim"),
             (f"Types: {counts}\n", "dim"),
-            (f"File: {doc.path.name if doc.path else 'n/a'}\n", "dim"),
+            (f"File: {doc.file or 'n/a'}\n", "dim"),
             (f"Pre-infographic: {'yes' if wire else 'not written'}\n", "dim"),
             (f"Exports: {exports or 'none'}\n\n", "dim"),
         ]
@@ -419,12 +420,17 @@ class InfographicApp(LibraryApp):
         launcher is stdlib-only — so the card reports the diagram's source and
         size and offers to open the file itself.
         """
-        doc = self.selected()
-        base = doc.path.parent if doc and doc.path else Path.cwd()
         value = (section.value or "").strip()
         inline = "<svg" in value.lower()
-        target = None if inline else (base / value)
-        exists = bool(inline) or (target is not None and target.exists())
+        # Non-inline sections name a file the backend serves under
+        # /api/content/infographics/<value> (e.g. "assets/foo.svg").
+        target = None
+        if value and not inline:
+            try:
+                target = self.api.download("infographics", value)
+            except ContentAPIError:
+                target = None
+        exists = bool(inline) or target is not None
 
         box = tk.Frame(card, background="#f7f9fb", highlightthickness=1, highlightbackground=LINE)
         box.pack(fill="x", padx=20, pady=(0, 10))
@@ -438,7 +444,7 @@ class InfographicApp(LibraryApp):
         elif exists:
             detail = f"{value}  ·  {target.stat().st_size:,} bytes"
         else:
-            detail = f"{value}  ·  file not found"
+            detail = f"{value}  ·  not served by the backend"
         tk.Label(
             box, text=detail, font=("Segoe UI", 9), background="#f7f9fb",
             foreground=MUTED if exists else "#b42318", anchor="w", justify="left", wraplength=700,
@@ -502,7 +508,7 @@ class InfographicApp(LibraryApp):
     def show_wireframe(self) -> None:
         """Open the pre-infographic — the wireframe written before finalizing."""
         doc = self.selected()
-        wire = doc.wireframe_path() if doc else None
+        wire = doc.wireframe_name() if doc else None
         if wire is None:
             messagebox.showinfo(
                 "No pre-infographic",
@@ -512,6 +518,11 @@ class InfographicApp(LibraryApp):
                 "--pre-infographic out.wireframe.txt …",
                 parent=self,
             )
+            return
+        try:
+            wireframe_text = self.api.document_bytes("infographics", wire).decode("utf-8")
+        except ContentAPIError as error:
+            messagebox.showerror("Could not load the wireframe", str(error), parent=self)
             return
         win = tk.Toplevel(self)
         win.title(f"Pre-infographic: {doc.title}")
@@ -527,7 +538,7 @@ class InfographicApp(LibraryApp):
         bar = ttk.Scrollbar(win, orient="vertical", command=text.yview)
         bar.grid(row=1, column=1, sticky="ns")
         text.configure(yscrollcommand=bar.set)
-        text.insert("1.0", wire.read_text(encoding="utf-8"))
+        text.insert("1.0", wireframe_text)
         text.configure(state="disabled")
         ttk.Button(win, text="Close", command=win.destroy).grid(
             row=2, column=0, columnspan=2, sticky="e", padx=14, pady=10
@@ -536,7 +547,7 @@ class InfographicApp(LibraryApp):
 
     def open_html(self) -> None:
         doc = self.selected()
-        html = doc.html_path() if doc else None
+        html = doc.html_name() if doc else None
         if html is None:
             messagebox.showinfo(
                 "No HTML export",
@@ -546,21 +557,21 @@ class InfographicApp(LibraryApp):
                 parent=self,
             )
             return
-        webbrowser.open(html.resolve().as_uri())
-        self.set_status(f"Opened {html.name} in your browser")
+        try:
+            local = self.api.download("infographics", html)
+        except ContentAPIError as error:
+            messagebox.showerror("Could not load the HTML export", str(error), parent=self)
+            return
+        webbrowser.open(local.resolve().as_uri())
+        self.set_status(f"Opened {html} in your browser")
 
 
 def main() -> None:
-    default_dir = Path(__file__).resolve().parent.parent / "output" / "infographics"
     parser = argparse.ArgumentParser(description="View generated infographics in a GUI")
-    parser.add_argument("--infographic-dir", type=Path, default=default_dir,
-                        help=f"Folder containing infographic JSON files (default: {default_dir})")
+    add_api_argument(parser)
     args = parser.parse_args()
 
-    if not args.infographic_dir.is_dir():
-        raise SystemExit(f"Infographic folder not found: {args.infographic_dir}")
-
-    InfographicApp(args.infographic_dir).mainloop()
+    InfographicApp(connect_api(args.api_url)).mainloop()
 
 
 if __name__ == "__main__":

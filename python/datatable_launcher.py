@@ -9,7 +9,7 @@ whatever is currently visible.
 Standard library only -- no pandas required to read or export.
 
     python python/datatable_launcher.py
-    python python/datatable_launcher.py --table-dir output/datatables
+    python python/datatable_launcher.py --api-url http://127.0.0.1:8765
 """
 
 import argparse
@@ -20,7 +20,15 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Dict, List, Optional, Sequence
 
-from launcher_common import Chunk, LibraryApp, RichText, read_json, require
+from launcher_common import (
+    Chunk,
+    ContentAPI,
+    LibraryApp,
+    RichText,
+    add_api_argument,
+    connect_api,
+    require,
+)
 
 MAX_COL_WIDTH = 240
 MIN_COL_WIDTH = 70
@@ -43,12 +51,12 @@ class Table:
     title: str
     fields: List[Field]
     rows: List[Dict[str, str]] = field(default_factory=list)
-    path: Optional[Path] = None
+    file: Optional[str] = None
+    stem: Optional[str] = None
 
     @classmethod
-    def load(cls, path: Path) -> "Table":
-        data = read_json(path)
-        where = path.name
+    def from_document(cls, data: dict, entry: dict) -> "Table":
+        where = entry.get("file", "data table")
         raw_fields = require(data, "fields", list, where)
         raw_rows = require(data, "data", list, where)
         if not raw_rows:
@@ -72,7 +80,13 @@ class Table:
         if missing:
             raise ValueError(f"{where}: rows are missing declared field(s) {', '.join(missing)}")
 
-        return cls(title=require(data, "title", str, where), fields=fields, rows=rows, path=path)
+        return cls(
+            title=require(data, "title", str, where),
+            fields=fields,
+            rows=rows,
+            file=entry.get("file"),
+            stem=entry.get("stem"),
+        )
 
     def columns(self) -> List[str]:
         """Declared fields first, then any extras the rows carry (source_id, page)."""
@@ -96,17 +110,17 @@ class DataTableApp(LibraryApp):
     window_title = "Data Table Browser"
     window_size = "1260x780"
 
-    def __init__(self, folder: Path):
+    def __init__(self, api: ContentAPI):
         self.visible: List[Dict[str, str]] = []
         self.sort_column: Optional[str] = None
         self.sort_reverse = False
-        super().__init__(folder)
+        super().__init__(api, "datatables")
         self.set_hint("click a header to sort · select a row to see the full record")
 
     # -- library hooks -----------------------------------------------------
 
-    def load_one(self, path: Path) -> Table:
-        return Table.load(path)
+    def load_one(self, data: dict, entry: dict) -> Table:
+        return Table.from_document(data, entry)
 
     def title_of(self, doc: Table) -> str:
         return doc.title
@@ -117,7 +131,7 @@ class DataTableApp(LibraryApp):
             (f"Rows: {len(doc.rows)}\n", "dim"),
             (f"Columns: {len(doc.columns())}\n", "dim"),
             (f"Declared fields: {len(doc.fields)}\n", "dim"),
-            (f"File: {doc.path.name if doc.path else 'n/a'}\n\n", "dim"),
+            (f"File: {doc.file or 'n/a'}\n\n", "dim"),
             ("Fields\n", "h3"),
         ]
         for f in doc.fields:
@@ -265,7 +279,7 @@ class DataTableApp(LibraryApp):
         if doc is None or not self.visible:
             messagebox.showinfo("Nothing to export", "No rows are currently visible.", parent=self)
             return
-        default = f"{doc.path.stem}_filtered.csv" if doc.path else "table.csv"
+        default = f"{doc.stem}_filtered.csv" if doc.stem else "table.csv"
         target = filedialog.asksaveasfilename(
             parent=self, title="Export visible rows",
             defaultextension=".csv", initialfile=default,
@@ -286,16 +300,11 @@ class DataTableApp(LibraryApp):
 
 
 def main() -> None:
-    default_dir = Path(__file__).resolve().parent.parent / "output" / "datatables"
     parser = argparse.ArgumentParser(description="Browse generated data tables in a GUI")
-    parser.add_argument("--table-dir", type=Path, default=default_dir,
-                        help=f"Folder containing data table JSON files (default: {default_dir})")
+    add_api_argument(parser)
     args = parser.parse_args()
 
-    if not args.table_dir.is_dir():
-        raise SystemExit(f"Data table folder not found: {args.table_dir}")
-
-    DataTableApp(args.table_dir).mainloop()
+    DataTableApp(connect_api(args.api_url)).mainloop()
 
 
 if __name__ == "__main__":

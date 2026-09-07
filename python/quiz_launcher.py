@@ -5,21 +5,21 @@ Scans a folder of quiz JSON files (the format produced by
 lists them in a launcher window, and runs the selected quiz in an interactive
 viewer with immediate feedback, scoring, and an end-of-quiz review.
 
-Standard library only -- tkinter, json, pathlib, random, argparse.
+Standard library only -- tkinter, random, argparse, urllib.
 
     python python/quiz_launcher.py
-    python python/quiz_launcher.py --quiz-dir output/quizzes
+    python python/quiz_launcher.py --api-url http://127.0.0.1:8765
 """
 
 import argparse
-import json
 import random
 import tkinter as tk
 from dataclasses import dataclass, field
-from pathlib import Path
 from tkinter import font as tkfont
 from tkinter import messagebox, ttk
 from typing import List, Optional
+
+from launcher_common import ContentAPI, ContentAPIError, add_api_argument, connect_api
 
 DIFFICULTIES = ("recall", "understanding", "application", "analysis", "expert")
 
@@ -47,10 +47,10 @@ class Quiz:
     title: str
     description: str
     questions: List[Question]
-    path: Optional[Path] = None
+    file: Optional[str] = None
 
     @classmethod
-    def from_dict(cls, data: dict, path: Optional[Path] = None) -> "Quiz":
+    def from_dict(cls, data: dict, file: Optional[str] = None) -> "Quiz":
         questions = []
         for i, raw in enumerate(data.get("questions", [])):
             q = Question(
@@ -74,23 +74,23 @@ class Quiz:
             title=data["title"],
             description=data.get("description", ""),
             questions=questions,
-            path=path,
+            file=file,
         )
 
-    @classmethod
-    def load(cls, path: Path) -> "Quiz":
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return cls.from_dict(data, path)
 
-
-def load_quiz_dir(quiz_dir: Path) -> tuple:
-    """Load every *.json quiz in a folder. Returns (quizzes, errors)."""
+def load_quizzes(api: ContentAPI) -> tuple:
+    """Fetch every quiz from the content backend. Returns (quizzes, errors)."""
     quizzes, errors = [], []
-    for path in sorted(quiz_dir.glob("*.json")):
+    try:
+        entries = api.entries("quizzes")
+    except ContentAPIError as exc:
+        return [], [str(exc)]
+    for entry in entries:
+        file = entry.get("file", "?")
         try:
-            quizzes.append(Quiz.load(path))
-        except Exception as exc:  # malformed file shouldn't kill the launcher
-            errors.append(f"{path.name}: {exc}")
+            quizzes.append(Quiz.from_dict(api.document_json("quizzes", file), file))
+        except Exception as exc:  # one bad doc shouldn't kill the launcher
+            errors.append(f"{file}: {exc}")
     return quizzes, errors
 
 
@@ -110,7 +110,7 @@ def shuffled_copy(quiz: Quiz, shuffle_questions: bool, shuffle_options: bool) ->
         )
     if shuffle_questions:
         random.shuffle(questions)
-    return Quiz(quiz.title, quiz.description, questions, quiz.path)
+    return Quiz(quiz.title, quiz.description, questions, quiz.file)
 
 
 # --------------------------------------------------------------------------
@@ -431,11 +431,11 @@ class ResultsWindow(tk.Toplevel):
 # --------------------------------------------------------------------------
 
 class LauncherApp(tk.Tk):
-    """Main window: pick a quiz from a folder and start it."""
+    """Main window: pick a quiz served by the backend and start it."""
 
-    def __init__(self, quiz_dir: Path):
+    def __init__(self, api: ContentAPI):
         super().__init__()
-        self.quiz_dir = quiz_dir
+        self.api = api
         self.quizzes: List[Quiz] = []
 
         self.title("Quiz Launcher")
@@ -503,8 +503,8 @@ class LauncherApp(tk.Tk):
         ttk.Button(footer, text="Start quiz", command=self.start_quiz).grid(row=0, column=3, sticky="e")
 
     def refresh(self) -> None:
-        self.dir_label.config(text=str(self.quiz_dir.resolve()))
-        self.quizzes, errors = load_quiz_dir(self.quiz_dir)
+        self.dir_label.config(text=self.api.base_url)
+        self.quizzes, errors = load_quizzes(self.api)
         self.listbox.delete(0, "end")
         for quiz in self.quizzes:
             self.listbox.insert("end", f"{quiz.title}  ({len(quiz.questions)} q)")
@@ -512,7 +512,9 @@ class LauncherApp(tk.Tk):
             self.listbox.selection_set(0)
             self._show_details()
         else:
-            self._set_details([(f"No quizzes found in {self.quiz_dir}\n", "dim")])
+            self._set_details(
+                [(f"No quizzes available from {self.api.base_url}\n", "dim")]
+            )
         if errors:
             messagebox.showwarning("Some quizzes failed to load", "\n".join(errors), parent=self)
 
@@ -545,7 +547,7 @@ class LauncherApp(tk.Tk):
             (f"Questions: {len(quiz.questions)}\n", "dim"),
             (f"Difficulty mix: {breakdown}\n", "dim"),
             (f"Sources: {', '.join(sources) if sources else 'n/a'}\n", "dim"),
-            (f"File: {quiz.path.name if quiz.path else 'n/a'}\n", "dim"),
+            (f"File: {quiz.file or 'n/a'}\n", "dim"),
         ])
 
     def start_quiz(self) -> None:
@@ -558,23 +560,15 @@ class LauncherApp(tk.Tk):
 
 
 def main() -> None:
-    default_dir = Path(__file__).resolve().parent.parent / "output" / "quizzes"
     parser = argparse.ArgumentParser(description="Launch generated quizzes in a GUI")
-    parser.add_argument(
-        "--quiz-dir",
-        type=Path,
-        default=default_dir,
-        help=f"Folder containing quiz JSON files (default: {default_dir})",
-    )
+    add_api_argument(parser)
     parser.add_argument("--seed", type=int, default=None, help="Random seed for shuffling")
     args = parser.parse_args()
 
     if args.seed is not None:
         random.seed(args.seed)
-    if not args.quiz_dir.is_dir():
-        raise SystemExit(f"Quiz folder not found: {args.quiz_dir}")
 
-    LauncherApp(args.quiz_dir).mainloop()
+    LauncherApp(connect_api(args.api_url)).mainloop()
 
 
 if __name__ == "__main__":

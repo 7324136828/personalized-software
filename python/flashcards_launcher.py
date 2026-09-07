@@ -8,18 +8,25 @@ grade yourself, and track what still needs review.
 Standard library only.
 
     python python/flashcards_launcher.py
-    python python/flashcards_launcher.py --flashcard-dir output/flashcards
+    python python/flashcards_launcher.py --api-url http://127.0.0.1:8765
 """
 
 import argparse
 import random
 import tkinter as tk
 from dataclasses import dataclass, field
-from pathlib import Path
 from tkinter import ttk
 from typing import Dict, List, Optional, Sequence
 
-from launcher_common import Chunk, LibraryApp, RichText, read_json, require
+from launcher_common import (
+    Chunk,
+    ContentAPI,
+    LibraryApp,
+    RichText,
+    add_api_argument,
+    connect_api,
+    require,
+)
 
 CARD_TYPES = ("basic", "cloze", "definition", "concept")
 
@@ -62,12 +69,11 @@ class CardSet:
     title: str
     description: str
     cards: List[Card]
-    path: Optional[Path] = None
+    file: Optional[str] = None
 
     @classmethod
-    def load(cls, path: Path) -> "CardSet":
-        data = read_json(path)
-        where = path.name
+    def from_document(cls, data: dict, entry: dict) -> "CardSet":
+        where = entry.get("file", "flashcard set")
         cards = require(data, "cards", list, where)
         if not cards:
             raise ValueError(f"{where}: set contains no cards")
@@ -75,7 +81,7 @@ class CardSet:
             title=require(data, "title", str, where),
             description=data.get("description", ""),
             cards=[Card.from_dict(c, f"{where} card {i + 1}") for i, c in enumerate(cards)],
-            path=path,
+            file=entry.get("file"),
         )
 
     def tags(self) -> List[str]:
@@ -99,12 +105,12 @@ class FlashcardsApp(LibraryApp):
     window_title = "Flashcard Study"
     window_size = "1080x700"
 
-    def __init__(self, folder: Path):
+    def __init__(self, api: ContentAPI):
         self.deck: List[Card] = []
         self.index = 0
         self.revealed = False
         self.known: Dict[int, bool] = {}
-        super().__init__(folder)
+        super().__init__(api, "flashcards")
         self.bind("<space>", lambda _e: self._space())
         self.bind("<Right>", lambda _e: self.next_card())
         self.bind("<Left>", lambda _e: self.prev_card())
@@ -114,8 +120,8 @@ class FlashcardsApp(LibraryApp):
 
     # -- library hooks -----------------------------------------------------
 
-    def load_one(self, path: Path) -> CardSet:
-        return CardSet.load(path)
+    def load_one(self, data: dict, entry: dict) -> CardSet:
+        return CardSet.from_document(data, entry)
 
     def title_of(self, doc: CardSet) -> str:
         return doc.title
@@ -129,7 +135,7 @@ class FlashcardsApp(LibraryApp):
             (f"Cards: {len(doc.cards)}\n", "dim"),
             (f"Types: {counts}\n", "dim"),
             (f"Tags: {tags}\n", "dim"),
-            (f"File: {doc.path.name if doc.path else 'n/a'}\n", "dim"),
+            (f"File: {doc.file or 'n/a'}\n", "dim"),
         ]
 
     def build_toolbar(self, toolbar: ttk.Frame) -> None:
@@ -336,19 +342,15 @@ class FlashcardsApp(LibraryApp):
 
 
 def main() -> None:
-    default_dir = Path(__file__).resolve().parent.parent / "output" / "flashcards"
     parser = argparse.ArgumentParser(description="Study generated flashcards in a GUI")
-    parser.add_argument("--flashcard-dir", type=Path, default=default_dir,
-                        help=f"Folder containing flashcard JSON files (default: {default_dir})")
+    add_api_argument(parser)
     parser.add_argument("--seed", type=int, default=None, help="Random seed for shuffling")
     args = parser.parse_args()
 
     if args.seed is not None:
         random.seed(args.seed)
-    if not args.flashcard_dir.is_dir():
-        raise SystemExit(f"Flashcard folder not found: {args.flashcard_dir}")
 
-    FlashcardsApp(args.flashcard_dir).mainloop()
+    FlashcardsApp(connect_api(args.api_url)).mainloop()
 
 
 if __name__ == "__main__":

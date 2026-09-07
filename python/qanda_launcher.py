@@ -1,13 +1,13 @@
 """Browse and answer generated free-text Q&A sets.
 
-The launcher reads the same ``output/qandas`` JSON format as the React view.
-Answers are autosaved in the same temporary session directory used by the
-Python backend, so either UI can retrieve and export them.
+The launcher fetches Q&A sets from the content backend (the same JSON the React
+view uses). Answers are autosaved in the same temporary session directory used
+by that backend, so either UI can retrieve and export them.
 
 Standard library only.
 
     python python/qanda_launcher.py
-    python python/qanda_launcher.py --qanda-dir output/qandas
+    python python/qanda_launcher.py --api-url http://127.0.0.1:8765
 """
 
 from __future__ import annotations
@@ -24,7 +24,14 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import List, Optional, Sequence
 
-from launcher_common import Chunk, LibraryApp, read_json, require
+from launcher_common import (
+    Chunk,
+    ContentAPI,
+    LibraryApp,
+    add_api_argument,
+    connect_api,
+    require,
+)
 
 
 DEFAULT_RESPONSE_DIR = Path(tempfile.gettempdir()) / "personalized-software" / "qa-sessions"
@@ -47,12 +54,11 @@ class QASet:
     title: str
     description: str
     questions: List[QAPrompt]
-    path: Path
+    file: str
 
     @classmethod
-    def load(cls, path: Path) -> "QASet":
-        data = read_json(path)
-        where = path.name
+    def from_document(cls, data: dict, entry: dict) -> "QASet":
+        where = entry.get("file", "Q&A set")
         raw_questions = require(data, "questions", list, where)
         if not raw_questions:
             raise ValueError(f"{where}: Q&A set contains no questions")
@@ -92,7 +98,7 @@ class QASet:
             title=require(data, "title", str, where),
             description=description,
             questions=questions,
-            path=path,
+            file=entry.get("file", where),
         )
 
 
@@ -102,7 +108,7 @@ class QandaApp(LibraryApp):
     window_title = "Free-text Q&A"
     window_size = "1160x760"
 
-    def __init__(self, folder: Path, response_dir: Path):
+    def __init__(self, api: ContentAPI, response_dir: Path):
         self.response_dir = response_dir
         self.current_doc: Optional[QASet] = None
         self.session: Optional[dict] = None
@@ -110,12 +116,12 @@ class QandaApp(LibraryApp):
         self._loading_text = False
         self._dirty = False
         self._autosave_job: Optional[str] = None
-        super().__init__(folder)
+        super().__init__(api, "qandas")
         self.set_hint("responses autosave temporarily · export JSON to keep a copy")
         self.protocol("WM_DELETE_WINDOW", self._close)
 
-    def load_one(self, path: Path) -> QASet:
-        return QASet.load(path)
+    def load_one(self, data: dict, entry: dict) -> QASet:
+        return QASet.from_document(data, entry)
 
     def title_of(self, doc: QASet) -> str:
         return doc.title
@@ -126,7 +132,7 @@ class QandaApp(LibraryApp):
             (doc.description + "\n\n", None),
             (f"Questions: {len(doc.questions)}\n", "dim"),
             (f"Required: {sum(question.required for question in doc.questions)}\n", "dim"),
-            (f"File: {doc.path.name}\n", "dim"),
+            (f"File: {doc.file}\n", "dim"),
             (f"Temporary responses: {self.response_dir}\n", "dim"),
         ]
 
@@ -194,7 +200,7 @@ class QandaApp(LibraryApp):
         now = utc_now()
         session = {
             "id": uuid.uuid4().hex,
-            "qaFile": doc.path.name,
+            "qaFile": doc.file,
             "title": doc.title,
             "status": "in_progress",
             "currentQuestion": 0,
@@ -218,7 +224,7 @@ class QandaApp(LibraryApp):
             try:
                 session = json.loads(path.read_text(encoding="utf-8"))
                 response_ids = [response["id"] for response in session["responses"]]
-                if session.get("qaFile") == doc.path.name and response_ids == expected_ids:
+                if session.get("qaFile") == doc.file and response_ids == expected_ids:
                     matches.append(session)
             except (OSError, json.JSONDecodeError, KeyError, TypeError):
                 continue
@@ -400,14 +406,8 @@ class QandaApp(LibraryApp):
 
 
 def main() -> None:
-    root = Path(__file__).resolve().parent.parent
     parser = argparse.ArgumentParser(description="Launch generated free-text Q&A sets")
-    parser.add_argument(
-        "--qanda-dir",
-        type=Path,
-        default=root / "output" / "qandas",
-        help="Folder containing Q&A JSON files",
-    )
+    add_api_argument(parser)
     parser.add_argument(
         "--response-dir",
         type=Path,
@@ -415,9 +415,7 @@ def main() -> None:
         help="Temporary session folder shared with the Python backend",
     )
     args = parser.parse_args()
-    if not args.qanda_dir.is_dir():
-        raise SystemExit(f"Q&A folder not found: {args.qanda_dir}")
-    QandaApp(args.qanda_dir, args.response_dir).mainloop()
+    QandaApp(connect_api(args.api_url), args.response_dir).mainloop()
 
 
 if __name__ == "__main__":

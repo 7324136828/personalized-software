@@ -1,8 +1,14 @@
 """Serve generated content and temporary free-text Q&A sessions.
 
 The server intentionally uses only Python's standard library. Generated files
-are read directly from ``output/`` on every request, so the React application
-does not need a separate data-sync step.
+are read directly from ``new_output/`` on every request, so the React
+application does not need a separate data-sync step.
+
+Content is organised per subject: ``new_output/<subject>/<kind>/<file>`` (for
+example ``new_output/classical_chinese/quizzes/quiz_heart_sutra.json``). The
+manifest aggregates every subject into one list per kind. The older flat
+layout (``output/<kind>/<file>``) is still read when present, so an existing
+checkout keeps working.
 """
 
 from __future__ import annotations
@@ -28,8 +34,9 @@ from typing import Any
 from urllib.parse import unquote, urlsplit
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "output"
+# server.py lives at <repo>/python/backend/server.py
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "new_output"
 DEFAULT_STATIC_DIR = PROJECT_ROOT / "react" / "dist"
 DEFAULT_RESPONSE_DIR = Path(tempfile.gettempdir()) / "personalized-software" / "qa-sessions"
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
@@ -64,13 +71,31 @@ def safe_child(base: Path, relative: str) -> Path:
     return candidate
 
 
+def kind_dirs(output_dir: Path, kind: str) -> list[Path]:
+    """Every directory that may hold documents of ``kind``.
+
+    Supports both the per-subject layout (``new_output/<subject>/<kind>/``) and
+    the older flat layout (``output/<kind>/``). Subjects are visited in
+    case-insensitive name order so results are stable.
+    """
+    dirs: list[Path] = []
+    flat = output_dir / kind
+    if flat.is_dir():
+        dirs.append(flat)
+    if output_dir.is_dir():
+        for subject in sorted(output_dir.iterdir(), key=lambda item: item.name.lower()):
+            nested = subject / kind
+            if subject.is_dir() and nested.is_dir():
+                dirs.append(nested)
+    return dirs
+
+
 def build_manifest(output_dir: Path) -> dict[str, Any]:
     """Build the content index directly from the current output directory."""
     kinds: dict[str, list[dict[str, Any]]] = {}
     for kind, sidecar_suffixes in KINDS.items():
-        kind_dir = output_dir / kind
         documents: list[dict[str, Any]] = []
-        if kind_dir.is_dir():
+        for kind_dir in kind_dirs(output_dir, kind):
             for path in sorted(kind_dir.glob("*.json"), key=lambda item: item.name.lower()):
                 try:
                     data = json.loads(path.read_text(encoding="utf-8"))
@@ -85,9 +110,17 @@ def build_manifest(output_dir: Path) -> dict[str, Any]:
                     for suffix in sidecar_suffixes
                     if (kind_dir / f"{stem}{suffix}").is_file()
                 ]
+                subject = kind_dir.parent.name if kind_dir.parent != output_dir else None
                 documents.append(
-                    {"file": path.name, "stem": stem, "title": str(title), "sidecars": sidecars}
+                    {
+                        "file": path.name,
+                        "stem": stem,
+                        "title": str(title),
+                        "sidecars": sidecars,
+                        "subject": subject,
+                    }
                 )
+        documents.sort(key=lambda item: item["file"].lower())
         kinds[kind] = documents
     return {"generatedAt": utc_now(), "kinds": kinds}
 
@@ -326,8 +359,16 @@ class LearningRequestHandler(SimpleHTTPRequestHandler):
         kind, separator, file_name = relative.partition("/")
         if not separator or kind not in KINDS or not file_name:
             raise FileNotFoundError(relative)
-        path = safe_child(self.output_dir / kind, file_name)
-        if not path.is_file():
+        # The manifest merges every subject into one list per kind, so a request
+        # only carries "<kind>/<file>". Look through each subject's kind folder
+        # (and the legacy flat folder) for the first match.
+        path = None
+        for kind_dir in kind_dirs(self.output_dir, kind):
+            candidate = safe_child(kind_dir, file_name)
+            if candidate.is_file():
+                path = candidate
+                break
+        if path is None:
             raise FileNotFoundError(relative)
         try:
             body = path.read_bytes()
@@ -468,7 +509,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Shortcut for --host 0.0.0.0: serve to other devices on this network",
     )
     parser.add_argument("--port", type=int, default=8765, help="Backend/production web port")
-    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=DEFAULT_OUTPUT_DIR,
+        help="Content root; scanned as <output-dir>/<subject>/<kind>/ (default: new_output)",
+    )
     parser.add_argument("--response-dir", type=Path, default=DEFAULT_RESPONSE_DIR)
     parser.add_argument("--static-dir", type=Path, default=DEFAULT_STATIC_DIR)
     parser.add_argument("--dev", action="store_true", help="Run the API and Vite development server together")

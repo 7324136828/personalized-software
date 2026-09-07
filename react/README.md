@@ -36,10 +36,12 @@ From this directory, the equivalent npm scripts are:
 
 ## Data flow
 
-`../python_backend/server.py` builds a manifest from `../output` on every
-request. It serves JSON and related files (`.md`, `.html`, `.svg`, `.csv`,
-`.mmd`, `.txt`, and `.wireframe.txt`) under `/api/content`. The browser always
-sees current generated output without staging it in `react/public/data`.
+`../python/backend/server.py` builds a manifest from `../new_output` on every
+request, merging every subject folder (`new_output/<subject>/<kind>/`) into one
+list per kind. It serves JSON and related files (`.md`, `.html`, `.svg`,
+`.csv`, `.mmd`, `.txt`, and `.wireframe.txt`) under `/api/content`. The browser
+always sees current generated output without staging it in `react/public/data`.
+The older flat `../output/<kind>/` layout is still read when present.
 
 A malformed document is reported in the sidebar rather than taking the whole
 view down. In development, Vite proxies `/api` to the backend. In production,
@@ -47,8 +49,8 @@ the backend serves the React build and API from the same origin.
 
 ## Free-text Q&A
 
-Q&A sets live in `output/qandas/*.json`. Questions may be plain strings or
-objects:
+Q&A sets live in `new_output/<subject>/qandas/*.json`. Questions may be plain
+strings or objects:
 
 ```json
 {
@@ -71,7 +73,7 @@ sessions to the operating system's temporary directory and prints the exact
 location when it starts. The Q&A view restores the last session for each file
 and can download its JSON during or after the flow.
 
-Run `python ../python_backend/server.py --help` to configure the content,
+Run `python ../python/backend/server.py --help` to configure the content,
 response, static, or port location.
 
 ## Viewer map

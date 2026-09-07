@@ -8,17 +8,24 @@ at a time, with a slide index, speaker notes, and a full-screen present mode.
 Standard library only.
 
     python python/slides_launcher.py
-    python python/slides_launcher.py --slide-dir output/slides
+    python python/slides_launcher.py --api-url http://127.0.0.1:8765
 """
 
 import argparse
 import tkinter as tk
 from dataclasses import dataclass, field
-from pathlib import Path
 from tkinter import ttk
 from typing import List, Optional, Sequence
 
-from launcher_common import Chunk, LibraryApp, RichText, read_json, require
+from launcher_common import (
+    Chunk,
+    ContentAPI,
+    LibraryApp,
+    RichText,
+    add_api_argument,
+    connect_api,
+    require,
+)
 
 
 @dataclass
@@ -53,19 +60,18 @@ class Deck:
 
     title: str
     slides: List[Slide]
-    path: Optional[Path] = None
+    file: Optional[str] = None
 
     @classmethod
-    def load(cls, path: Path) -> "Deck":
-        data = read_json(path)
-        where = path.name
+    def from_document(cls, data: dict, entry: dict) -> "Deck":
+        where = entry.get("file", "presentation")
         slides = require(data, "slides", list, where)
         if not slides:
             raise ValueError(f"{where}: presentation has no slides")
         return cls(
             title=require(data, "title", str, where),
             slides=[Slide.from_dict(s, f"{where} slide {i + 1}") for i, s in enumerate(slides)],
-            path=path,
+            file=entry.get("file"),
         )
 
     def sources(self) -> List[str]:
@@ -83,11 +89,11 @@ class SlidesApp(LibraryApp):
     window_title = "Slide Presenter"
     window_size = "1200x780"
 
-    def __init__(self, folder: Path):
+    def __init__(self, api: ContentAPI):
         self.deck: Optional[Deck] = None
         self.index = 0
         self._fullscreen: Optional[tk.Toplevel] = None
-        super().__init__(folder)
+        super().__init__(api, "slides")
         self.bind("<Right>", lambda _e: self.next_slide())
         self.bind("<Left>", lambda _e: self.prev_slide())
         self.bind("<space>", lambda _e: self.next_slide())
@@ -96,8 +102,8 @@ class SlidesApp(LibraryApp):
 
     # -- library hooks -----------------------------------------------------
 
-    def load_one(self, path: Path) -> Deck:
-        return Deck.load(path)
+    def load_one(self, data: dict, entry: dict) -> Deck:
+        return Deck.from_document(data, entry)
 
     def title_of(self, doc: Deck) -> str:
         return doc.title
@@ -111,7 +117,7 @@ class SlidesApp(LibraryApp):
             (f"Bullets: {bullets}\n", "dim"),
             (f"With speaker notes: {noted}\n", "dim"),
             (f"Sources: {', '.join(doc.sources()) or 'none'}\n", "dim"),
-            (f"File: {doc.path.name if doc.path else 'n/a'}\n\n", "dim"),
+            (f"File: {doc.file or 'n/a'}\n\n", "dim"),
             ("Slides\n", "h3"),
             ("".join(f"  {i + 1}. {s.title}\n" for i, s in enumerate(doc.slides)), None),
         ]
@@ -293,16 +299,11 @@ class SlidesApp(LibraryApp):
 
 
 def main() -> None:
-    default_dir = Path(__file__).resolve().parent.parent / "output" / "slides"
     parser = argparse.ArgumentParser(description="Present generated slide decks in a GUI")
-    parser.add_argument("--slide-dir", type=Path, default=default_dir,
-                        help=f"Folder containing presentation JSON files (default: {default_dir})")
+    add_api_argument(parser)
     args = parser.parse_args()
 
-    if not args.slide_dir.is_dir():
-        raise SystemExit(f"Slide folder not found: {args.slide_dir}")
-
-    SlidesApp(args.slide_dir).mainloop()
+    SlidesApp(connect_api(args.api_url)).mainloop()
 
 
 if __name__ == "__main__":

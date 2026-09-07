@@ -13,7 +13,7 @@ from typing import Sequence
 
 ROOT = Path(__file__).resolve().parent
 REACT_DIR = ROOT / "react"
-BACKEND = ROOT / "python_backend/server.py"
+BACKEND = ROOT / "python" / "backend" / "server.py"
 VENV_PYTHON = ROOT / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 
 
@@ -64,8 +64,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     npm = executable("npm")
     if not (REACT_DIR / "package.json").is_file():
         raise RunError(f"React project was not found in {REACT_DIR}")
-    if not (ROOT / "output").is_dir():
-        raise RunError(f"Generated-content folder was not found at {ROOT / 'output'}")
+    if not (ROOT / "new_output").is_dir() and not (ROOT / "output").is_dir():
+        raise RunError(f"Generated-content folder was not found at {ROOT / 'new_output'}")
     if not BACKEND.is_file():
         raise RunError(f"Python backend was not found at {BACKEND}")
 

@@ -292,7 +292,7 @@ export function MindmapView() {
           : ""
       }
       hint="Click a node to collapse/expand · drag to pan · Ctrl+wheel to zoom"
-      emptyMessage="No mind maps found in output/mindmaps."
+      emptyMessage="No mind maps found in new_output/*/mindmaps."
     >
       {map ? (
         <div

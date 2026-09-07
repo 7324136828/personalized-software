@@ -302,7 +302,7 @@ export function QandaView() {
       toolbar={toolbar}
       status={status}
       hint="Answers autosave; download JSON to keep a permanent copy"
-      emptyMessage="No Q&A sets found in output/qandas."
+      emptyMessage="No Q&A sets found in new_output/*/qandas."
     >
       {body}
     </LibraryShell>

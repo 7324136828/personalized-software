@@ -171,7 +171,7 @@ export function ReportsView() {
           : ""
       }
       hint="Select a section to jump · type to search within the report"
-      emptyMessage="No reports found in output/reports."
+      emptyMessage="No reports found in new_output/*/reports."
     >
       {report ? (
         <article className="scroll pad prose" ref={body}>

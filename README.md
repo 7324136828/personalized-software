@@ -5,7 +5,8 @@ A comprehensive AI learning system that supports multiple LLM providers (Ollama,
 ## Quick Start (React viewers)
 
 A batch script at the repository root builds the React viewers and starts a
-local Python backend that serves generated content directly from `output/`:
+local Python backend (`python/backend/server.py`) that serves generated content
+directly from `new_output/`:
 
 ```bat
 run.bat
@@ -180,8 +181,10 @@ The requirements file includes:
 │   │   └── document2.txt
 │   └── dataset2/
 │       └── document3.txt
-├── output/                 # Generated content will be saved here
+├── new_output/             # Generated content, grouped as new_output/<subject>/<kind>/
 ├── python/
+│   ├── backend/           # Local HTTP server for the React viewers
+│   │   └── server.py
 │   ├── ollama_learning/   # Main package
 │   │   ├── ollama_client.py
 │   │   ├── rag_system.py
@@ -304,10 +307,11 @@ Start `run.bat dev`, open the **Q&A** tab, and select the generated set.
 Responses autosave to the Python backend's temporary directory and can be
 downloaded as JSON during or after the session.
 
-The matching desktop launcher reads and writes the same Q&A/session formats:
+The matching desktop launcher fetches Q&A sets from the running backend and
+writes the same session format:
 
 ```bash
-python python/qanda_launcher.py --qanda-dir output/qandas
+python python/qanda_launcher.py
 ```
 
 ### Mind Maps
@@ -382,10 +386,11 @@ python python/podcasts.py --input examples/podcasts/classical_chinese.json `
   --output output/podcasts/classical_chinese.mp3 --device auto
 ```
 
-Open the **Podcasts** tab after running `run.bat`, or launch the desktop viewer:
+Open the **Podcasts** tab after running `run.bat`, or launch the desktop viewer
+(it needs the backend running):
 
 ```powershell
-python python/podcast_launcher.py --podcast-dir output/podcasts
+python python/podcast_launcher.py
 ```
 
 Both interfaces show the transcript and let the listener download the audio and
@@ -606,14 +611,19 @@ python python/ollama_learning/datatable.py \
 
 ## Interactive GUIs
 
-Open the desktop viewer hub and choose any available content type:
+The desktop viewers read their content from the local backend
+(`python/backend/server.py`) over HTTP, so start it first — `python run_app.py
+serve` (or `dev`), or run the server directly. Then open the hub and choose any
+content type the backend has:
 
 ```bash
 python python/launcher_common.py
 ```
 
-Use `--list` to inspect availability without opening a window, or
-`--launch qanda` (and the other listed names) to open a viewer directly.
+Every viewer accepts `--api-url` (default `http://127.0.0.1:8765`, overridable
+with the `CONTENT_API_URL` environment variable). Use `--list` to inspect
+availability without opening a window, or `--launch qanda` (and the other listed
+names) to open a viewer directly.
 
 Flashcards, quizzes, Q&A sets, slide decks, and podcasts include interactive controls:
 

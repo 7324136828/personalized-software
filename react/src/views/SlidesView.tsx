@@ -143,7 +143,7 @@ export function SlidesView() {
       toolbar={toolbar}
       status={deck && slide ? `${deck.title} · ${slide.bullets.length} bullets` : ""}
       hint="← → or space to move · F5 to present · Esc exits present mode"
-      emptyMessage="No presentations found in output/slides."
+      emptyMessage="No presentations found in new_output/*/slides."
     >
       {deck && slide ? (
         <div className="slides-pane">

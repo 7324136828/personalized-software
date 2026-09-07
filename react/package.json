@@ -5,10 +5,10 @@
   "type": "module",
   "description": "React port of the tkinter launchers for generated learning content",
   "scripts": {
-    "dev": "node scripts/run-python.mjs python_backend/server.py --dev",
+    "dev": "node scripts/run-python.mjs python/backend/server.py --dev",
     "dev:frontend": "vite",
     "build": "tsc -b && vite build",
-    "start": "node scripts/run-python.mjs python_backend/server.py",
+    "start": "node scripts/run-python.mjs python/backend/server.py",
     "typecheck": "tsc -b --noEmit"
   },
   "dependencies": {
