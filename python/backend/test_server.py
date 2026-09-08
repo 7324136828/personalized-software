@@ -11,7 +11,24 @@ from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from backend.server import create_server
+from backend.server import DEFAULT_OUTPUT_DIR, create_server, parse_args
+
+
+class ArgumentTest(unittest.TestCase):
+    def test_folder_path_uses_its_output_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            args = parse_args(["--folder-path", str(folder)])
+
+        self.assertEqual(args.folder_path, folder.resolve())
+        self.assertEqual(args.output_dir, folder.resolve() / "output")
+
+    def test_default_output_directory_is_unchanged(self) -> None:
+        self.assertEqual(parse_args([]).output_dir, DEFAULT_OUTPUT_DIR)
+
+    def test_folder_path_and_output_dir_are_mutually_exclusive(self) -> None:
+        with self.assertRaises(SystemExit):
+            parse_args(["--folder-path", "workspace", "--output-dir", "content"])
 
 
 class BackendTest(unittest.TestCase):

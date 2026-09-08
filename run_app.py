@@ -40,6 +40,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--port", type=int, help="frontend port; defaults to 4173 or 5174 in dev")
     parser.add_argument("--no-open", action="store_true", help="do not open a browser")
     parser.add_argument(
+        "--folder-path",
+        type=Path,
+        metavar="PATH",
+        help="workspace folder whose output directory should be served",
+    )
+    parser.add_argument(
         "--host",
         help="interface to bind (use 0.0.0.0 to reach the app from other devices)",
     )
@@ -59,13 +65,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     port = args.port or (5174 if args.command == "dev" else 4173)
     host = "0.0.0.0" if args.lan and not args.host else args.host
     host_args = ["--host", host] if host else []
+    folder_path = args.folder_path.expanduser().resolve() if args.folder_path else None
+    output_dir = (folder_path / "output") if folder_path else (ROOT / "new_output")
+    folder_args = ["--folder-path", folder_path] if folder_path else []
 
     executable("node")
     npm = executable("npm")
     if not (REACT_DIR / "package.json").is_file():
         raise RunError(f"React project was not found in {REACT_DIR}")
-    if not (ROOT / "new_output").is_dir() and not (ROOT / "output").is_dir():
-        raise RunError(f"Generated-content folder was not found at {ROOT / 'new_output'}")
+    if not output_dir.is_dir() and (folder_path or not (ROOT / "output").is_dir()):
+        raise RunError(f"Generated-content folder was not found at {output_dir}")
     if not BACKEND.is_file():
         raise RunError(f"Python backend was not found at {BACKEND}")
 
@@ -83,6 +92,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "--frontend-port",
             str(port),
             *host_args,
+            *folder_args,
         ]
         if not args.no_open:
             command.append("--open")
@@ -97,7 +107,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"[run] Build ready at {REACT_DIR / 'dist'}")
         return 0
 
-    command = [backend_python, BACKEND, "--port", str(port), *host_args]
+    command = [backend_python, BACKEND, "--port", str(port), *host_args, *folder_args]
     if not args.no_open:
         command.append("--open")
     return run(command)

@@ -15,6 +15,13 @@ run.bat
 It installs dependencies on first run, builds for production, serves on
 http://localhost:4173, and opens the Q&A view. Use `run.bat dev` for hot reload,
 `run.bat build` to build without serving, or `run.bat help` for all options.
+
+To serve generated content from another workspace, pass its parent folder. The
+server will read that folder's `output` directory:
+
+```bat
+run.bat serve --folder-path C:\path\to\workspace
+```
 No `npm run sync` step is needed. See `react/README.md` for details.
 
 ## Features

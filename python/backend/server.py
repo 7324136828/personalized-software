@@ -595,11 +595,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Shortcut for --host 0.0.0.0: serve to other devices on this network",
     )
     parser.add_argument("--port", type=int, default=8765, help="Backend/production web port")
-    parser.add_argument(
+    content_group = parser.add_mutually_exclusive_group()
+    content_group.add_argument(
         "--output-dir",
         type=Path,
         default=DEFAULT_OUTPUT_DIR,
         help="Content root; scanned as <output-dir>/<subject>/<kind>/ (default: new_output)",
+    )
+    content_group.add_argument(
+        "--folder-path",
+        type=Path,
+        metavar="PATH",
+        help="Workspace folder; serve generated content from <PATH>/output",
     )
     parser.add_argument("--response-dir", type=Path, default=DEFAULT_RESPONSE_DIR)
     parser.add_argument("--static-dir", type=Path, default=DEFAULT_STATIC_DIR)
@@ -609,6 +616,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parsed = parser.parse_args(argv)
     if parsed.lan and parsed.host == "127.0.0.1":
         parsed.host = "0.0.0.0"
+    if parsed.folder_path is not None:
+        parsed.folder_path = parsed.folder_path.expanduser().resolve()
+        parsed.output_dir = parsed.folder_path / "output"
     return parsed
 
 
