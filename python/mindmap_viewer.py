@@ -5,20 +5,20 @@ Scans a folder of mind map JSON files (the format produced by
 and renders the selected map as an interactive tidy tree on a tkinter canvas:
 collapsible branches, pan and zoom, depth filtering, and search highlighting.
 
-Standard library only -- tkinter, json, pathlib, argparse.
+Standard library only -- tkinter, argparse, urllib.
 
     python python/mindmap_viewer.py
-    python python/mindmap_viewer.py --mindmap-dir output/mindmaps
+    python python/mindmap_viewer.py --api-url http://127.0.0.1:8765
 """
 
 import argparse
-import json
 import tkinter as tk
 from dataclasses import dataclass, field
-from pathlib import Path
 from tkinter import font as tkfont
 from tkinter import messagebox, ttk
 from typing import Dict, List, Optional, Tuple
+
+from launcher_common import ContentAPI, ContentAPIError, add_api_argument, connect_api
 
 # Layout constants (unscaled canvas units)
 H_GAP = 46          # horizontal gap between a node box and its children
@@ -87,12 +87,11 @@ class Node:
 @dataclass
 class MindMapDoc:
     root: Node
-    path: Optional[Path] = None
+    file: Optional[str] = None
 
     @classmethod
-    def load(cls, path: Path) -> "MindMapDoc":
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return cls(Node.from_dict(data), path)
+    def from_document(cls, data: dict, entry: dict) -> "MindMapDoc":
+        return cls(Node.from_dict(data), entry.get("file"))
 
     @property
     def title(self) -> str:
@@ -102,14 +101,19 @@ class MindMapDoc:
         return sum(1 for _ in self.root.walk())
 
 
-def load_mindmap_dir(folder: Path) -> Tuple[List[MindMapDoc], List[str]]:
-    """Load every *.json mind map in a folder. Returns (docs, errors)."""
+def load_mindmaps(api: ContentAPI) -> Tuple[List[MindMapDoc], List[str]]:
+    """Fetch every mind map from the content backend. Returns (docs, errors)."""
+    try:
+        entries = api.entries("mindmaps")
+    except ContentAPIError as exc:
+        return [], [str(exc)]
     docs, errors = [], []
-    for path in sorted(folder.glob("*.json")):
+    for entry in entries:
+        file = entry.get("file", "?")
         try:
-            docs.append(MindMapDoc.load(path))
+            docs.append(MindMapDoc.from_document(api.document_json("mindmaps", file), entry))
         except Exception as exc:
-            errors.append(f"{path.name}: {exc}")
+            errors.append(f"{file}: {exc}")
     return docs, errors
 
 
@@ -382,9 +386,9 @@ class MindMapCanvas(ttk.Frame):
 class MindMapViewerApp(tk.Tk):
     """Launcher plus canvas: pick a mind map on the left, visualize on the right."""
 
-    def __init__(self, folder: Path):
+    def __init__(self, api: ContentAPI):
         super().__init__()
-        self.folder = folder
+        self.api = api
         self.docs: List[MindMapDoc] = []
 
         self.title("Mind Map Viewer")
@@ -471,7 +475,7 @@ class MindMapViewerApp(tk.Tk):
     # -- data --------------------------------------------------------------
 
     def refresh(self) -> None:
-        self.docs, errors = load_mindmap_dir(self.folder)
+        self.docs, errors = load_mindmaps(self.api)
         self.listbox.delete(0, "end")
         for doc in self.docs:
             self.listbox.insert("end", doc.title)
@@ -480,7 +484,9 @@ class MindMapViewerApp(tk.Tk):
             self.listbox.selection_set(0)
             self._select()
         else:
-            self._set_details([(f"No mind maps found in {self.folder}\n", "dim")])
+            self._set_details(
+                [(f"No mind maps available from {self.api.base_url}\n", "dim")]
+            )
             self._set_status("")
         if errors:
             messagebox.showwarning("Some mind maps failed to load", "\n".join(errors), parent=self)
@@ -500,7 +506,7 @@ class MindMapViewerApp(tk.Tk):
             (f"Main branches: {len(branches)}\n", "dim"),
             (f"Total nodes: {doc.node_count()}\n", "dim"),
             (f"Depth: {doc.root.max_depth()}\n", "dim"),
-            (f"File: {doc.path.name if doc.path else 'n/a'}\n\n", "dim"),
+            (f"File: {doc.file or 'n/a'}\n\n", "dim"),
             ("Branches\n", "h"),
             ("".join(f"  • {b.name}\n" for b in branches), None),
         ])
@@ -524,20 +530,11 @@ class MindMapViewerApp(tk.Tk):
 
 
 def main() -> None:
-    default_dir = Path(__file__).resolve().parent.parent / "output" / "mindmaps"
     parser = argparse.ArgumentParser(description="Visualize generated mind maps in a GUI")
-    parser.add_argument(
-        "--mindmap-dir",
-        type=Path,
-        default=default_dir,
-        help=f"Folder containing mind map JSON files (default: {default_dir})",
-    )
+    add_api_argument(parser)
     args = parser.parse_args()
 
-    if not args.mindmap_dir.is_dir():
-        raise SystemExit(f"Mind map folder not found: {args.mindmap_dir}")
-
-    MindMapViewerApp(args.mindmap_dir).mainloop()
+    MindMapViewerApp(connect_api(args.api_url)).mainloop()
 
 
 if __name__ == "__main__":

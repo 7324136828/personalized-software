@@ -319,7 +319,7 @@ export function InfographicView() {
           : ""
       }
       hint="Scroll to read · filter by section type · open the pre-infographic wireframe"
-      emptyMessage="No infographics found in output/infographics."
+      emptyMessage="No infographics found in new_output/*/infographics."
     >
       {info ? (
         <div className="scroll pad infographic">

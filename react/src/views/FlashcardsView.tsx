@@ -309,7 +309,7 @@ export function FlashcardsView() {
       toolbar={toolbar}
       status={`${Object.keys(grades).length} of ${deck.length} graded · ${known} known, ${toReview} to review`}
       hint="space flip/advance · ← → navigate · j known · f review"
-      emptyMessage="No flashcard sets found in output/flashcards."
+      emptyMessage="No flashcard sets found in new_output/*/flashcards."
     >
       {body}
     </LibraryShell>

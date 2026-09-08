@@ -1,7 +1,7 @@
 """Desktop viewer for podcast JSON and matching MP3/WAV sidecars.
 
     python python/podcast_launcher.py
-    python python/podcast_launcher.py --podcast-dir output/podcasts
+    python python/podcast_launcher.py --api-url http://127.0.0.1:8765
 """
 
 from __future__ import annotations
@@ -14,7 +14,16 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import List, Optional, Sequence
 
-from launcher_common import Chunk, LibraryApp, RichText, read_json, require
+from launcher_common import (
+    Chunk,
+    ContentAPI,
+    ContentAPIError,
+    LibraryApp,
+    RichText,
+    add_api_argument,
+    connect_api,
+    require,
+)
 
 
 @dataclass
@@ -45,13 +54,12 @@ class PodcastEpisode:
     show: str
     cast: List[CastMember]
     segments: List[Segment]
-    path: Path
-    audio_path: Optional[Path]
+    file: str
+    audio_file: Optional[str]
 
     @classmethod
-    def load(cls, path: Path) -> "PodcastEpisode":
-        data = read_json(path)
-        where = path.name
+    def from_document(cls, data: dict, entry: dict) -> "PodcastEpisode":
+        where = entry.get("file", "podcast")
         cast: List[CastMember] = []
         speaker_ids: set[str] = set()
         for index, raw in enumerate(require(data, "cast", list, where)):
@@ -96,7 +104,7 @@ class PodcastEpisode:
             raise ValueError(f"{where}: script must contain spoken dialogue")
 
         audio = next(
-            (candidate for suffix in (".mp3", ".wav") if (candidate := path.with_suffix(suffix)).is_file()),
+            (name for name in entry.get("sidecars", []) if name.lower().endswith((".mp3", ".wav"))),
             None,
         )
         return cls(
@@ -104,8 +112,8 @@ class PodcastEpisode:
             show=str(data.get("podcast_show", "")),
             cast=cast,
             segments=segments,
-            path=path,
-            audio_path=audio,
+            file=entry.get("file", where),
+            audio_file=audio,
         )
 
     def turn_count(self) -> int:
@@ -116,8 +124,11 @@ class PodcastApp(LibraryApp):
     window_title = "Podcast Library"
     window_size = "1180x780"
 
-    def load_one(self, path: Path) -> PodcastEpisode:
-        return PodcastEpisode.load(path)
+    def __init__(self, api: ContentAPI):
+        super().__init__(api, "podcasts")
+
+    def load_one(self, data: dict, entry: dict) -> PodcastEpisode:
+        return PodcastEpisode.from_document(data, entry)
 
     def title_of(self, doc: PodcastEpisode) -> str:
         return doc.title
@@ -129,8 +140,8 @@ class PodcastApp(LibraryApp):
             (f"Cast: {', '.join(member.name for member in doc.cast)}\n", "dim"),
             (f"Segments: {len(doc.segments)}\n", "dim"),
             (f"Spoken turns: {doc.turn_count()}\n", "dim"),
-            (f"Audio: {doc.audio_path.name if doc.audio_path else 'not generated'}\n", "dim"),
-            (f"Script: {doc.path.name}\n", "dim"),
+            (f"Audio: {doc.audio_file if doc.audio_file else 'not generated'}\n", "dim"),
+            (f"Script: {doc.file}\n", "dim"),
         ]
 
     def build_toolbar(self, toolbar: ttk.Frame) -> None:
@@ -141,6 +152,20 @@ class PodcastApp(LibraryApp):
         ttk.Button(toolbar, text="Save script as...", command=self._save_script).grid(
             row=0, column=4, padx=(8, 0)
         )
+        ttk.Button(toolbar, text="Refresh Podcasts", command=self._refresh_podcasts).grid(
+            row=0, column=5, padx=(8, 0)
+        )
+
+    def _refresh_podcasts(self) -> None:
+        """Ask the backend to (re)generate podcasts, then reload the library."""
+        try:
+            status, body = self.api.post("/api/generate_podcast")
+        except ContentAPIError as error:
+            messagebox.showerror("Refresh failed", str(error), parent=self)
+            return
+        message = body.get("status") or f"HTTP {status}"
+        self.set_status(f"Refresh Podcasts: {message}")
+        self.refresh()
 
     def build_content(self, parent: ttk.Frame) -> None:
         frame = ttk.Frame(parent)
@@ -168,50 +193,61 @@ class PodcastApp(LibraryApp):
                     ]
                 )
         self.body.set_chunks(chunks)
-        state = "normal" if doc.audio_path else "disabled"
+        state = "normal" if doc.audio_file else "disabled"
         self.play_button.configure(state=state)
         self.save_audio_button.configure(state=state)
         self.set_status(
             f"{len(doc.segments)} segments · {doc.turn_count()} spoken turns · "
-            f"{'audio ready' if doc.audio_path else 'script only'}"
+            f"{'audio ready' if doc.audio_file else 'script only'}"
         )
         self.set_hint("Play opens the system audio player · Save As creates a local copy")
 
+    def _fetch(self, name: str) -> Optional[Path]:
+        """Download a podcast file into the local cache, or report the failure."""
+        try:
+            return self.api.download("podcasts", name)
+        except ContentAPIError as error:
+            messagebox.showerror("Download failed", str(error), parent=self)
+            return None
+
     def _play(self) -> None:
         doc = self.selected()
-        if doc and doc.audio_path:
-            webbrowser.open(doc.audio_path.resolve().as_uri())
+        if not (doc and doc.audio_file):
+            return
+        local = self._fetch(doc.audio_file)
+        if local:
+            webbrowser.open(local.resolve().as_uri())
 
-    def _save(self, source: Path, label: str) -> None:
+    def _save(self, name: str, label: str) -> None:
+        local = self._fetch(name)
+        if local is None:
+            return
         destination = filedialog.asksaveasfilename(
             parent=self,
             title=f"Save {label}",
-            initialfile=source.name,
-            defaultextension=source.suffix,
+            initialfile=Path(name).name,
+            defaultextension=Path(name).suffix,
         )
         if destination:
-            shutil.copy2(source, destination)
+            shutil.copy2(local, destination)
             messagebox.showinfo("Saved", f"Saved to {destination}", parent=self)
 
     def _save_audio(self) -> None:
         doc = self.selected()
-        if doc and doc.audio_path:
-            self._save(doc.audio_path, "podcast audio")
+        if doc and doc.audio_file:
+            self._save(doc.audio_file, "podcast audio")
 
     def _save_script(self) -> None:
         doc = self.selected()
         if doc:
-            self._save(doc.path, "podcast script")
+            self._save(doc.file, "podcast script")
 
 
 def main() -> None:
-    default_dir = Path(__file__).resolve().parent.parent / "output" / "podcasts"
     parser = argparse.ArgumentParser(description="Play and read generated podcasts")
-    parser.add_argument("--podcast-dir", type=Path, default=default_dir)
+    add_api_argument(parser)
     args = parser.parse_args()
-    if not args.podcast_dir.is_dir():
-        raise SystemExit(f"Podcast folder not found: {args.podcast_dir}")
-    PodcastApp(args.podcast_dir).mainloop()
+    PodcastApp(connect_api(args.api_url)).mainloop()
 
 
 if __name__ == "__main__":

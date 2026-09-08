@@ -7,7 +7,7 @@
 ## Repository hygiene
 
 - Keep source code, configuration, prompts, skills, and documentation in Git.
-- Do not commit `input/`, `output/`, `react/public/data/`, dependencies, build artifacts, caches, or local secrets.
+- Do not commit `input/`, `output/`, `new_output/`, `react/public/data/`, dependencies, build artifacts, caches, or local secrets.
 - Run the relevant Python checks and `npm run typecheck` from `react/` after changes.
 
 ## Releases

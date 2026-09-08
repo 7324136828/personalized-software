@@ -176,8 +176,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if not args.skip_verify:
         run([VENV_PYTHON, "-m", "pip", "check"])
-        run([VENV_PYTHON, "-m", "compileall", "-q", ROOT / "python", ROOT / "python_backend"])
-        run([VENV_PYTHON, "-m", "unittest", "python_backend.test_server", "-v"])
+        run([VENV_PYTHON, "-m", "compileall", "-q", ROOT / "python"])
+        run(
+            [VENV_PYTHON, "-m", "unittest", "backend.test_server", "-v"],
+            cwd=ROOT / "python",
+        )
         smoke_test = (
             "import sys, tkinter, kokoro, numpy, pandas, pydantic, openai, anthropic; "
             f"sys.path.insert(0, {str(ROOT / 'python')!r}); "

@@ -179,7 +179,7 @@ export function DatatableView() {
           : ""
       }
       hint="Click a header to sort · select a row to see the full record"
-      emptyMessage="No data tables found in output/datatables."
+      emptyMessage="No data tables found in new_output/*/datatables."
     >
       {table ? (
         <div className="table-pane">

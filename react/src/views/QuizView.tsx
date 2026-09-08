@@ -295,7 +295,7 @@ export function QuizView() {
       toolbar={toolbar}
       status={run ? `Score: ${score}/${answered}` : `${lib.documents.length} quizzes`}
       hint="Select an answer, submit, then advance"
-      emptyMessage="No quizzes found in output/quizzes."
+      emptyMessage="No quizzes found in new_output/*/quizzes."
     >
       {body}
     </LibraryShell>

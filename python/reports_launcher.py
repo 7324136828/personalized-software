@@ -8,17 +8,24 @@ citations, and in-document search.
 Standard library only.
 
     python python/reports_launcher.py
-    python python/reports_launcher.py --report-dir output/reports
+    python python/reports_launcher.py --api-url http://127.0.0.1:8765
 """
 
 import argparse
 import tkinter as tk
 from dataclasses import dataclass, field
-from pathlib import Path
 from tkinter import ttk
 from typing import List, Optional, Sequence
 
-from launcher_common import Chunk, LibraryApp, RichText, read_json, require
+from launcher_common import (
+    Chunk,
+    ContentAPI,
+    LibraryApp,
+    RichText,
+    add_api_argument,
+    connect_api,
+    require,
+)
 
 
 @dataclass
@@ -57,12 +64,11 @@ class Report:
     executive_summary: str
     sections: List[Section]
     conclusions: str
-    path: Optional[Path] = None
+    file: Optional[str] = None
 
     @classmethod
-    def load(cls, path: Path) -> "Report":
-        data = read_json(path)
-        where = path.name
+    def from_document(cls, data: dict, entry: dict) -> "Report":
+        where = entry.get("file", "report")
         sections = []
         for i, raw in enumerate(data.get("sections", [])):
             loc = f"{where} section {i + 1}"
@@ -91,7 +97,7 @@ class Report:
             executive_summary=require(data, "executive_summary", str, where),
             sections=sections,
             conclusions=require(data, "conclusions", str, where),
-            path=path,
+            file=entry.get("file"),
         )
 
     def claim_count(self) -> int:
@@ -123,15 +129,15 @@ class ReportsApp(LibraryApp):
     window_title = "Report Reader"
     window_size = "1180x780"
 
-    def __init__(self, folder: Path):
+    def __init__(self, api: ContentAPI):
         self._marks: List[str] = []
-        super().__init__(folder)
+        super().__init__(api, "reports")
         self.set_hint("select a section to jump · type to search within the report")
 
     # -- library hooks -----------------------------------------------------
 
-    def load_one(self, path: Path) -> Report:
-        return Report.load(path)
+    def load_one(self, data: dict, entry: dict) -> Report:
+        return Report.from_document(data, entry)
 
     def title_of(self, doc: Report) -> str:
         return doc.title
@@ -145,7 +151,7 @@ class ReportsApp(LibraryApp):
             (f"Citations: {doc.citation_count()}\n", "dim"),
             (f"Words: {doc.word_count():,}\n", "dim"),
             (f"Sources: {sources}\n", "dim"),
-            (f"File: {doc.path.name if doc.path else 'n/a'}\n\n", "dim"),
+            (f"File: {doc.file or 'n/a'}\n\n", "dim"),
             ("Outline\n", "h3"),
             ("".join(f"  {i + 1}. {s.title}\n" for i, s in enumerate(doc.sections)), None),
         ]
@@ -252,16 +258,11 @@ class ReportsApp(LibraryApp):
 
 
 def main() -> None:
-    default_dir = Path(__file__).resolve().parent.parent / "output" / "reports"
     parser = argparse.ArgumentParser(description="Read generated reports in a GUI")
-    parser.add_argument("--report-dir", type=Path, default=default_dir,
-                        help=f"Folder containing report JSON files (default: {default_dir})")
+    add_api_argument(parser)
     args = parser.parse_args()
 
-    if not args.report_dir.is_dir():
-        raise SystemExit(f"Report folder not found: {args.report_dir}")
-
-    ReportsApp(args.report_dir).mainloop()
+    ReportsApp(connect_api(args.api_url)).mainloop()
 
 
 if __name__ == "__main__":

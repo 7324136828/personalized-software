@@ -1,1 +1,1 @@
-python run_app.py serve --lan
+@python "%~dp0run_app.py" serve --lan %*

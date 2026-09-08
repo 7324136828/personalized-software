@@ -66,3 +66,20 @@ export function updateQASession(
 export function qaDownloadUrl(sessionId: string): string {
   return `/api/qa/sessions/${encodeURIComponent(sessionId)}/download`;
 }
+
+/**
+ * Ask the backend to (re)generate podcasts. Currently a placeholder endpoint
+ * that replies 501, so the response body is returned regardless of status.
+ */
+export async function generatePodcast(): Promise<{ status?: string }> {
+  const response = await fetch(`${import.meta.env.BASE_URL}api/generate_podcast`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  try {
+    return (await response.json()) as { status?: string };
+  } catch {
+    return { status: `HTTP ${response.status}` };
+  }
+}

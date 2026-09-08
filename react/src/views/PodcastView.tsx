@@ -1,4 +1,6 @@
+import { useState } from "react";
 import { LibraryShell, DetailRow } from "../components/LibraryShell";
+import { generatePodcast } from "../lib/api";
 import { dataUrl, req, ValidationError } from "../lib/content";
 import { useLibrary } from "../lib/useLibrary";
 import type { PodcastEpisode } from "../types";
@@ -56,8 +58,24 @@ function parsePodcast(raw: Record<string, unknown>, where: string): PodcastEpiso
 
 export function PodcastView() {
   const lib = useLibrary<PodcastEpisode>("podcasts", parsePodcast);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshNote, setRefreshNote] = useState<string | null>(null);
   const episode = lib.selected?.doc ?? null;
   const entry = lib.selected?.entry;
+
+  async function refreshPodcasts() {
+    setRefreshing(true);
+    setRefreshNote(null);
+    try {
+      const body = await generatePodcast();
+      setRefreshNote(`Refresh Podcasts: ${body.status ?? "requested"}`);
+      lib.reload();
+    } catch (error) {
+      setRefreshNote(`Refresh Podcasts failed: ${(error as Error).message}`);
+    } finally {
+      setRefreshing(false);
+    }
+  }
   const audioFile = entry?.sidecars.find((name) => /\.(mp3|wav)$/i.test(name));
   const audioUrl = audioFile ? dataUrl("podcasts", audioFile) : null;
   const names = new Map(episode?.cast.map((member) => [member.speaker_id, member.name]) ?? []);
@@ -82,6 +100,9 @@ export function PodcastView() {
   const toolbar = (
     <>
       <button type="button" onClick={lib.reload}>Reload</button>
+      <button type="button" onClick={refreshPodcasts} disabled={refreshing}>
+        {refreshing ? "Refreshing…" : "Refresh Podcasts"}
+      </button>
       <span className="divider" />
       {audioUrl && audioFile ? (
         <a className="button" href={audioUrl} download={audioFile}>Download audio</a>
@@ -106,9 +127,14 @@ export function PodcastView() {
       titleOf={(item) => item.episode_title}
       details={details}
       toolbar={toolbar}
-      status={episode ? `${episode.script.length} segments · ${turns} spoken turns · ${audioFile ? "audio ready" : "script only"}` : ""}
+      status={
+        refreshNote ??
+        (episode
+          ? `${episode.script.length} segments · ${turns} spoken turns · ${audioFile ? "audio ready" : "script only"}`
+          : "")
+      }
       hint="Listen in the browser or download the audio and JSON script"
-      emptyMessage="No podcasts found in output/podcasts."
+      emptyMessage="No podcasts found in new_output/*/podcasts."
     >
       {episode ? (
         <article className="scroll pad podcast">

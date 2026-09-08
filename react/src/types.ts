@@ -20,6 +20,9 @@ export interface ManifestEntry {
   stem: string;
   title: string;
   sidecars: string[];
+  /** Subject folder under new_output/ this document came from, or null for the
+   * legacy flat output/ layout. */
+  subject: string | null;
 }
 
 export interface Manifest {
