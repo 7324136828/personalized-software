@@ -1,0 +1,3 @@
+# Official Kokoro is intentionally isolated in the Python 3.12 TTS environment.
+kokoro==0.9.4
+numpy>=2.0,<3.0

@@ -4,24 +4,27 @@ The backend calls :func:`render_library` from the ``/api/generate_podcast``
 endpoint to (re)synthesise MP3/WAV audio for every podcast script JSON in the
 content tree, writing ``<stem>.<ext>`` next to each ``<stem>.json``.
 
-Only the standard library is imported at module load. The heavy audio stack
-(``kokoro``, ``torch``, ``numpy``, ``imageio-ffmpeg``) is imported lazily, so a
-server that never renders a podcast never pays for it.
+The official Kokoro package and PyTorch live in an isolated Python 3.12 service.
+This module exchanges JSON and WAV data with that service over loopback HTTP,
+so the main application can use a newer Python runtime without importing the
+speech model or sharing its dependency graph.
 """
 
 from __future__ import annotations
 
-import gc
 import hashlib
+import io
 import json
 import logging
+import os
 import re
 import subprocess
-import sys
 import tempfile
+import time
+import urllib.error
+import urllib.request
 import wave
 from dataclasses import asdict, dataclass
-from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
@@ -29,10 +32,86 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CHECKPOINT_DIR = PROJECT_ROOT / ".checkpoints" / "podcasts"
 MODEL_REPO = "hexgrad/Kokoro-82M"
+KOKORO_SERVICE_VERSION = "0.9.4"
+KOKORO_BASE_URL = os.environ.get("KOKORO_BASE_URL", "http://127.0.0.1:8880/v1").rstrip("/")
+KOKORO_REQUEST_TIMEOUT = float(os.environ.get("KOKORO_REQUEST_TIMEOUT", "600"))
 SAMPLE_RATE = 24_000
 LOG = logging.getLogger("podcast")
 PAUSE = re.compile(r"\[pause\s*=\s*(\d+)\]", re.IGNORECASE)
 PACING = (("dramatic", 0.90), ("reflective", 0.93), ("calm", 0.96), ("upbeat", 1.04))
+
+
+def kokoro_service_message() -> str:
+    return (
+        f"The Kokoro service is unavailable at {KOKORO_BASE_URL}. "
+        "Run setup.bat, then start the application with run.bat."
+    )
+
+
+class RemoteKokoroPipeline:
+    """Adapt the isolated OpenAI-compatible TTS service to the renderer API."""
+
+    def __init__(self, lang_code: str, device: str):
+        if device not in {"auto", "cpu", "cuda"}:
+            raise ValueError(f"Unsupported device: {device}")
+        self.lang_code = lang_code
+        self.device = device
+        self.endpoint = f"{KOKORO_BASE_URL}/audio/speech"
+        LOG.info("Using isolated Kokoro service: %s", self.endpoint)
+
+    def __call__(self, text: str, *, voice: str, speed: float):
+        if voice.lower().endswith(".pt"):
+            raise RuntimeError(
+                "The Kokoro service uses named voices and cannot load a custom .pt voice file."
+            )
+        payload = json.dumps(
+            {
+                "model": "kokoro",
+                "input": text,
+                "voice": voice,
+                "speed": speed,
+                "response_format": "wav",
+                "language": self.lang_code,
+            }
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            self.endpoint,
+            data=payload,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=KOKORO_REQUEST_TIMEOUT) as response:
+                body = response.read()
+                render_seconds = response.headers.get("X-Render-Seconds")
+                real_time_factor = response.headers.get("X-Real-Time-Factor")
+        except urllib.error.HTTPError as error:
+            detail = error.read().decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"Kokoro service returned HTTP {error.code}: {detail}"
+            ) from error
+        except (urllib.error.URLError, TimeoutError, OSError) as error:
+            raise RuntimeError(f"{kokoro_service_message()} ({error})") from error
+
+        with wave.open(io.BytesIO(body), "rb") as source:
+            if (
+                source.getnchannels() != 1
+                or source.getsampwidth() != 2
+                or source.getframerate() != SAMPLE_RATE
+                or source.getcomptype() != "NONE"
+            ):
+                raise RuntimeError("Kokoro service returned an unsupported WAV format")
+            pcm = source.readframes(source.getnframes())
+        import numpy as np
+
+        audio = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32767.0
+        if render_seconds and real_time_factor:
+            LOG.info(
+                "Kokoro service metrics: %ss render, RTF %s",
+                render_seconds,
+                real_time_factor,
+            )
+        yield text, "", audio
 
 
 @dataclass(frozen=True)
@@ -187,6 +266,7 @@ def write_wav(turns: list[Turn], path: Path, pipeline) -> float:
             LOG.info("[%d/%d] %s / %s (%s, speed %.2f)", index, len(turns),
                      turn.segment, turn.speaker, turn.voice, turn.speed)
             spoken_frames = 0
+            started = time.perf_counter()
             try:
                 for _, _, audio in pipeline(turn.text, voice=turn.voice, speed=turn.speed):
                     if audio is None:
@@ -205,49 +285,26 @@ def write_wav(turns: list[Turn], path: Path, pipeline) -> float:
                 raise RuntimeError(
                     f"Synthesis failed in {turn.segment!r}, speaker {turn.speaker!r}: {exc}"
                 ) from exc
+            elapsed = time.perf_counter() - started
+            audio_seconds = spoken_frames / SAMPLE_RATE
+            LOG.info(
+                "Completed [%d/%d] %s / %s: %d chars -> %.2fs audio in %.2fs "
+                "(RTF %.3f)",
+                index,
+                len(turns),
+                turn.segment,
+                turn.speaker,
+                len(turn.text),
+                audio_seconds,
+                elapsed,
+                elapsed / audio_seconds,
+            )
             frames += spoken_frames
     return frames / SAMPLE_RATE
 
 
-def select_device(requested: str) -> str:
-    """Check actual CUDA execution before downloading/loading the speech model."""
-    if requested == "cpu":
-        LOG.info("Using CPU for speech synthesis.")
-        return "cpu"
-    if requested not in ("auto", "cuda"):
-        raise ValueError(f"Unsupported device: {requested}")
-
-    import torch
-
-    cuda_help = (
-        "Install CUDA-enabled PyTorch in the Python environment running this script: "
-        "python -m pip install --upgrade torch --index-url https://download.pytorch.org/whl/cu128. "
-        "Also check your NVIDIA driver. Use device 'cpu' to run without CUDA."
-    )
-    try:
-        if not torch.cuda.is_available():
-            detail = ("This PyTorch installation is CPU-only."
-                      if torch.version.cuda is None
-                      else f"PyTorch CUDA {torch.version.cuda} cannot access an NVIDIA GPU.")
-            raise RuntimeError(detail)
-        # Availability alone does not guarantee this PyTorch build supports the
-        # GPU architecture. Execute and synchronize a tiny kernel to check.
-        torch.ones(1, device="cuda").add_(1).item()
-        index = torch.cuda.current_device()
-        properties = torch.cuda.get_device_properties(index)
-        LOG.info("Using CUDA GPU %d: %s (%.1f GiB VRAM; PyTorch %s; CUDA %s)",
-                 index, properties.name, properties.total_memory / (1024 ** 3),
-                 torch.__version__, torch.version.cuda)
-        return "cuda"
-    except (RuntimeError, AssertionError) as exc:
-        if requested == "cuda":
-            raise RuntimeError(f"GPU startup check failed: {exc} {cuda_help}") from exc
-        LOG.warning("CUDA unavailable: %s Falling back to CPU. %s", exc, cuda_help)
-        return "cpu"
-
-
 class LazyPipeline:
-    """Share a model across the batch, loading it only for uncached speech."""
+    """Share one HTTP client across the batch, creating it only when needed."""
 
     def __init__(self, lang_code: str, device: str):
         self.lang_code = lang_code
@@ -258,39 +315,13 @@ class LazyPipeline:
     def __call__(self, *args, **kwargs):
         if self.pipeline is None:
             self.started = True
-            try:
-                from kokoro import KPipeline
-            except ImportError as exc:
-                raise RuntimeError(
-                    "Missing audio dependencies. Run: python -m pip install -r requirements.txt"
-                ) from exc
-            selected_device = select_device(self.device)
-            LOG.info("Loading Kokoro; first use may download model and voice files.")
-            self.pipeline = KPipeline(lang_code=self.lang_code, repo_id=MODEL_REPO,
-                                      device=selected_device)
+            self.pipeline = RemoteKokoroPipeline(self.lang_code, self.device)
         return self.pipeline(*args, **kwargs)
 
     def close(self) -> None:
-        """Drop the model and return unused CUDA allocations to the driver."""
-        if not self.started:
-            return
-
-        # Remove our last long-lived model reference before collecting cycles and
-        # flushing PyTorch's allocator.  Use sys.modules so cleanup never imports
-        # the heavy stack for a batch that only reused cached audio.
+        """Drop the HTTP client; the isolated service retains the model."""
         self.pipeline = None
         self.started = False
-        gc.collect()
-        torch = sys.modules.get("torch")
-        cuda = getattr(torch, "cuda", None) if torch is not None else None
-        try:
-            if cuda is not None and cuda.is_initialized():
-                cuda.empty_cache()
-                LOG.info("Released Kokoro CUDA memory.")
-        except (RuntimeError, AssertionError) as exc:
-            # A failed CUDA context must not turn an otherwise completed render
-            # into a failed background job.
-            LOG.warning("Could not release Kokoro CUDA cache: %s", exc)
 
 
 def file_hash(path: Path) -> str:
@@ -302,14 +333,14 @@ def file_hash(path: Path) -> str:
 
 
 def checkpoint_context(lang_code: str) -> dict:
-    packages = {}
-    for package in ("kokoro", "misaki", "torch"):
-        try:
-            packages[package] = version(package)
-        except PackageNotFoundError:
-            packages[package] = "not-installed"
-    return {"schema": 1, "sample_rate": SAMPLE_RATE, "model": MODEL_REPO,
-            "lang_code": lang_code, "packages": packages}
+    return {
+        "schema": 2,
+        "sample_rate": SAMPLE_RATE,
+        "model": MODEL_REPO,
+        "lang_code": lang_code,
+        "renderer": "python-kokoro-http",
+        "kokoro": KOKORO_SERVICE_VERSION,
+    }
 
 
 def checkpoint_valid(audio: Path, receipt: Path) -> bool:

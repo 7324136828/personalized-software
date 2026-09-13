@@ -157,7 +157,7 @@ python python/ollama_learning/codex.py \
 
 - OpenAI API key
 - OpenAI Python package
-- For Python tasks: Python 3.7+
+- For Python tasks: Python 3.14.6
 
 ## Notes
 

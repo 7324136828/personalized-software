@@ -14,7 +14,9 @@ checkout keeps working.
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -31,7 +33,7 @@ from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 try:  # imported as ``backend.server`` (tests, package context)
     from backend import podcast_render
@@ -47,6 +49,7 @@ DEFAULT_RESPONSE_DIR = Path(tempfile.gettempdir()) / "personalized-software" / "
 PODCAST_CHECKPOINT_DIR = PROJECT_ROOT / ".checkpoints" / "podcasts"
 PODCAST_DEVICE = os.environ.get("PODCAST_DEVICE", "auto")
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
+PODCAST_LOG_CAPACITY = 2_000
 
 KINDS: dict[str, tuple[str, ...]] = {
     "quizzes": (),
@@ -62,6 +65,67 @@ KINDS: dict[str, tuple[str, ...]] = {
 
 SESSION_ID = re.compile(r"^[0-9a-f]{32}$")
 WRITE_LOCK = threading.Lock()
+
+
+class PodcastMemoryLogHandler(logging.Handler):
+    """Keep a bounded, thread-safe history of podcast renderer messages."""
+
+    def __init__(self, capacity: int = PODCAST_LOG_CAPACITY) -> None:
+        super().__init__(level=logging.INFO)
+        self.capacity = capacity
+        self._entries: deque[dict[str, Any]] = deque(maxlen=capacity)
+        self._entries_lock = threading.Lock()
+        self._next_id = 1
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            message = self.format(record)
+            timestamp = datetime.fromtimestamp(record.created, timezone.utc).isoformat()
+            with self._entries_lock:
+                entry_id = self._next_id
+                self._next_id += 1
+                self._entries.append(
+                    {
+                        "id": entry_id,
+                        "timestamp": timestamp,
+                        "level": record.levelname,
+                        "message": message,
+                    }
+                )
+        except Exception:  # pragma: no cover - logging must never stop rendering
+            self.handleError(record)
+
+    def clear(self) -> None:
+        with self._entries_lock:
+            self._entries.clear()
+
+    def snapshot(self, *, after: int = 0, limit: int = 200) -> dict[str, Any]:
+        with self._entries_lock:
+            stored = list(self._entries)
+
+        oldest_id = stored[0]["id"] if stored else None
+        latest_id = stored[-1]["id"] if stored else after
+        if after:
+            available = [entry for entry in stored if entry["id"] > after]
+            selected = available[:limit]
+        else:
+            available = stored
+            selected = stored[-limit:]
+        return {
+            "entries": selected,
+            "nextAfter": selected[-1]["id"] if selected else after,
+            "oldestId": oldest_id,
+            "latestId": latest_id,
+            "hasMore": len(available) > len(selected),
+            "truncated": bool(after and oldest_id is not None and after < oldest_id - 1),
+            "capacity": self.capacity,
+        }
+
+
+PODCAST_LOG_HANDLER = PodcastMemoryLogHandler()
+PODCAST_LOG = logging.getLogger("podcast")
+PODCAST_LOG.addHandler(PODCAST_LOG_HANDLER)
+PODCAST_LOG.setLevel(logging.INFO)
 
 
 def utc_now() -> str:
@@ -273,6 +337,11 @@ def podcast_script_paths(output_dir: Path) -> list[Path]:
 
 
 def _run_podcast_job(episode_paths: list[Path]) -> None:
+    PODCAST_LOG.info(
+        "Podcast render started: %d script(s), device=%s",
+        len(episode_paths),
+        PODCAST_DEVICE,
+    )
     try:
         result: dict[str, Any] = podcast_render.render_library(
             episode_paths,
@@ -280,9 +349,16 @@ def _run_podcast_job(episode_paths: list[Path]) -> None:
             checkpoint_dir=PODCAST_CHECKPOINT_DIR,
         )
         state = "done"
+        PODCAST_LOG.info(
+            "Podcast render finished: %d generated, %d skipped, %d failed",
+            len(result.get("generated", [])),
+            len(result.get("skipped", [])),
+            len(result.get("failed", [])),
+        )
     except Exception as error:  # noqa: BLE001 - report any failure back to the caller
         result = {"error": str(error)}
         state = "error"
+        PODCAST_LOG.exception("Podcast render stopped with an unexpected error")
     with PODCAST_JOB_LOCK:
         podcast_job["state"] = state
         podcast_job["result"] = result
@@ -295,9 +371,11 @@ def start_podcast_job(output_dir: Path) -> dict[str, Any]:
     with PODCAST_JOB_LOCK:
         if podcast_job["state"] == "running":
             return {"status": "already running", "startedAt": podcast_job["startedAt"]}
+        PODCAST_LOG_HANDLER.clear()
         podcast_job.update(
             state="running", startedAt=utc_now(), finishedAt=None, result=None
         )
+        PODCAST_LOG.info("Queued %d podcast script(s) for rendering", len(episode_paths))
     threading.Thread(
         target=_run_podcast_job, args=(episode_paths,), daemon=True
     ).start()
@@ -307,6 +385,27 @@ def start_podcast_job(output_dir: Path) -> dict[str, Any]:
 def podcast_job_status() -> dict[str, Any]:
     with PODCAST_JOB_LOCK:
         return dict(podcast_job)
+
+
+def podcast_log_status(*, after: int = 0, limit: int = 200) -> dict[str, Any]:
+    """Return job state together with a bounded page of renderer messages."""
+    result = PODCAST_LOG_HANDLER.snapshot(after=after, limit=limit)
+    result["job"] = podcast_job_status()
+    return result
+
+
+def query_integer(
+    query: dict[str, list[str]], name: str, default: int, minimum: int, maximum: int
+) -> int:
+    """Read one bounded integer query parameter or raise a client error."""
+    raw = query.get(name, [str(default)])[-1]
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise ValueError(f"{name} must be an integer") from error
+    if not minimum <= value <= maximum:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}")
+    return value
 
 
 class LearningRequestHandler(SimpleHTTPRequestHandler):
@@ -377,7 +476,8 @@ class LearningRequestHandler(SimpleHTTPRequestHandler):
             raise ValueError("Request body must be valid UTF-8 JSON") from error
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
-        path = unquote(urlsplit(self.path).path)
+        requested = urlsplit(self.path)
+        path = unquote(requested.path)
         try:
             if path == "/api/health":
                 self._json(HTTPStatus.OK, {"status": "ok"})
@@ -393,6 +493,15 @@ class LearningRequestHandler(SimpleHTTPRequestHandler):
                 return
             if path == "/api/generate_podcast":
                 self._json(HTTPStatus.OK, podcast_job_status())
+                return
+            if path == "/api/generate_podcast/logs":
+                query = parse_qs(requested.query)
+                after = query_integer(query, "after", 0, 0, 2**63 - 1)
+                limit = query_integer(query, "limit", 200, 1, 1_000)
+                self._json(
+                    HTTPStatus.OK,
+                    podcast_log_status(after=after, limit=limit),
+                )
                 return
             match = re.fullmatch(r"/api/qa/sessions/([^/]+)(/download)?", path)
             if match:
