@@ -144,7 +144,7 @@ You can use different providers for different tasks. Each command accepts a `--p
 
 ## Installation
 
-With Python 3.11+ installed, the setup command creates `.venv`, installs both
+With Python 3.14.6 installed, the setup command creates `.venv`, installs both
 Python and React dependencies, and runs the backend tests plus React checks.
 `setup.bat` is a one-line wrapper around `setup_environment.py`:
 
@@ -165,6 +165,8 @@ python -m venv .venv
 # Install Python and React dependencies
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
+# kokoro-onnx 0.6.1 is tested here on 3.14, but its metadata still says <3.14
+python -m pip install --ignore-requires-python kokoro-onnx==0.6.1
 cd react
 npm install
 ```
@@ -173,11 +175,27 @@ On macOS or Linux, activate with `source .venv/bin/activate`. `run.bat` and the
 React npm scripts automatically prefer the repository `.venv` when it exists.
 
 The requirements file includes:
-- Ollama support: `requests`
-- OpenAI support: `openai`
-- Claude support: `anthropic`
-- Core functionality: `pydantic`, `pandas`, `openpyxl`
-- Audio generation: `kokoro`, `numpy`, `imageio-ffmpeg`
+
+- Ollama support: `requests>=2.32`
+- OpenAI support: `openai>=1.50,<2.0`
+- Claude support: `anthropic>=0.40.0`
+- Core functionality: `pydantic>=2.7`, `pandas`, `openpyxl`
+- Audio processing: `kokoro-onnx`, `numpy`, `imageio-ffmpeg`
+
+Kokoro's official package currently supports Python 3.10-3.12. Under the
+project's Python 3.14.6 runtime, the renderer uses the tested `kokoro-onnx 0.6.1`
+wheel instead, avoiding the incompatible Kokoro 0.7.x / spaCy / blis stack.
+Because 0.6.1 still advertises Python `<3.14`, the setup script applies pip's
+Python-version metadata override only to that package. The 326 MB
+ONNX model and 28 MB voice bundle are downloaded to `.checkpoints/podcasts` on
+first use. When an NVIDIA RTX GPU is detected, setup installs the pinned CUDA
+12.8 builds of PyTorch, TorchAudio, and TorchVision, followed by ONNX Runtime's
+CUDA provider. ONNX Runtime reuses PyTorch's CUDA and cuDNN libraries, so both
+the official Kokoro path and the Python 3.14 `kokoro-onnx` fallback can run on
+the GPU. The CPU and GPU ONNX distributions are pinned to the same version;
+the CPU distribution remains installed because `kokoro-onnx` requires that
+package name, while setup installs the GPU wheel last to select its runtime.
+Systems without a compatible NVIDIA GPU continue to use ONNX on CPU.
 
 ## Project Structure
 

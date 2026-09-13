@@ -5,8 +5,8 @@ endpoint to (re)synthesise MP3/WAV audio for every podcast script JSON in the
 content tree, writing ``<stem>.<ext>`` next to each ``<stem>.json``.
 
 Only the standard library is imported at module load. The heavy audio stack
-(``kokoro``, ``torch``, ``numpy``, ``imageio-ffmpeg``) is imported lazily, so a
-server that never renders a podcast never pays for it.
+(``kokoro``/``kokoro-onnx`` and its runtime, ``numpy``, ``imageio-ffmpeg``) is
+imported lazily, so a server that never renders a podcast never pays for it.
 """
 
 from __future__ import annotations
@@ -15,10 +15,12 @@ import gc
 import hashlib
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
 import tempfile
+import urllib.request
 import wave
 from dataclasses import asdict, dataclass
 from importlib.metadata import PackageNotFoundError, version
@@ -29,10 +31,122 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CHECKPOINT_DIR = PROJECT_ROOT / ".checkpoints" / "podcasts"
 MODEL_REPO = "hexgrad/Kokoro-82M"
+ONNX_MODEL = DEFAULT_CHECKPOINT_DIR / "kokoro-v1.0.onnx"
+ONNX_VOICES = DEFAULT_CHECKPOINT_DIR / "voices-v1.0.bin"
+ONNX_MODEL_URL = (
+    "https://github.com/thewh1teagle/kokoro-onnx/releases/download/"
+    "model-files-v1.1/kokoro-v1.0.onnx"
+)
+ONNX_VOICES_URL = (
+    "https://github.com/thewh1teagle/kokoro-onnx/releases/download/"
+    "model-files-v1.1/voices-v1.0.bin"
+)
 SAMPLE_RATE = 24_000
 LOG = logging.getLogger("podcast")
 PAUSE = re.compile(r"\[pause\s*=\s*(\d+)\]", re.IGNORECASE)
 PACING = (("dramatic", 0.90), ("reflective", 0.93), ("calm", 0.96), ("upbeat", 1.04))
+ONNX_DLL_HANDLES: list[object] = []
+
+
+def missing_kokoro_message() -> str:
+    return "Missing audio dependencies. Run: python -m pip install -r requirements.txt"
+
+
+def ensure_onnx_asset(path: Path, url: str) -> None:
+    """Download a missing ONNX model asset and publish it atomically."""
+    if path.is_file():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pending = path.with_suffix(path.suffix + ".part")
+    LOG.info("Downloading %s to %s; this is required only on first use.", path.name, path.parent)
+    try:
+        urllib.request.urlretrieve(url, pending)
+        pending.replace(path)
+    except Exception:
+        pending.unlink(missing_ok=True)
+        raise
+
+
+def onnx_execution_providers(requested: str) -> list[str]:
+    """Select an ONNX provider, preferring CUDA for ``auto`` when available."""
+    if requested not in ("auto", "cpu", "cuda"):
+        raise ValueError(f"Unsupported device: {requested}")
+    if requested != "cpu":
+        # ONNX Runtime can reuse the CUDA and cuDNN libraries bundled with a
+        # matching PyTorch build when torch loads them first.
+        try:
+            import torch  # noqa: F401
+        except ImportError:
+            pass
+    import onnxruntime as ort
+
+    if requested != "cpu" and os.name == "nt" and not ONNX_DLL_HANDLES:
+        nvidia_root = Path(sys.prefix) / "Lib" / "site-packages" / "nvidia"
+        dll_dirs = sorted(nvidia_root.glob("*/bin"))
+        if dll_dirs:
+            os.environ["PATH"] = os.pathsep.join(
+                [*(str(path) for path in dll_dirs), os.environ.get("PATH", "")]
+            )
+        for dll_dir in dll_dirs:
+            ONNX_DLL_HANDLES.append(os.add_dll_directory(str(dll_dir)))
+    if requested != "cpu" and hasattr(ort, "preload_dlls"):
+        try:
+            ort.preload_dlls()
+        except RuntimeError as exc:
+            LOG.warning("Could not preload ONNX CUDA libraries: %s", exc)
+    available = ort.get_available_providers()
+    if requested == "cuda" and "CUDAExecutionProvider" not in available:
+        raise RuntimeError(
+            "CUDA was requested, but ONNX Runtime does not expose CUDAExecutionProvider. "
+            f"Available providers: {', '.join(available)}"
+        )
+    if requested != "cpu" and "CUDAExecutionProvider" in available:
+        return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    return ["CPUExecutionProvider"]
+
+
+def onnx_session_options(ort):
+    """Keep actionable ONNX errors while suppressing noisy provider warnings."""
+    ort.set_default_logger_severity(3)
+    options = ort.SessionOptions()
+    options.log_severity_level = 3  # Error; warning is the default level 2.
+    return options
+
+
+class OnnxKokoroPipeline:
+    """Adapt kokoro-onnx to the generator interface used by the renderer."""
+
+    def __init__(self, lang_code: str, device: str):
+        from kokoro_onnx import Kokoro
+        import onnxruntime as ort
+
+        ensure_onnx_asset(ONNX_MODEL, ONNX_MODEL_URL)
+        ensure_onnx_asset(ONNX_VOICES, ONNX_VOICES_URL)
+        providers = onnx_execution_providers(device)
+        LOG.info("Loading Kokoro ONNX with providers: %s", ", ".join(providers))
+        session = ort.InferenceSession(
+            str(ONNX_MODEL),
+            sess_options=onnx_session_options(ort),
+            providers=providers,
+        )
+        if device == "cuda" and hasattr(session, "disable_fallback"):
+            session.disable_fallback()
+        self.model = Kokoro.from_session(session, str(ONNX_VOICES))
+        self.language = {"a": "en-us", "b": "en-gb"}.get(lang_code, lang_code)
+
+    def __call__(self, text: str, *, voice: str, speed: float):
+        if voice.lower().endswith(".pt"):
+            raise RuntimeError(
+                "kokoro-onnx uses named voices and cannot load a custom .pt voice file."
+            )
+        audio, sample_rate = self.model.create(
+            text, voice=voice, speed=speed, lang=self.language
+        )
+        if sample_rate != SAMPLE_RATE:
+            raise RuntimeError(
+                f"kokoro-onnx returned {sample_rate} Hz audio; expected {SAMPLE_RATE} Hz."
+            )
+        yield text, "", audio
 
 
 @dataclass(frozen=True)
@@ -261,13 +375,15 @@ class LazyPipeline:
             try:
                 from kokoro import KPipeline
             except ImportError as exc:
-                raise RuntimeError(
-                    "Missing audio dependencies. Run: python -m pip install -r requirements.txt"
-                ) from exc
-            selected_device = select_device(self.device)
-            LOG.info("Loading Kokoro; first use may download model and voice files.")
-            self.pipeline = KPipeline(lang_code=self.lang_code, repo_id=MODEL_REPO,
-                                      device=selected_device)
+                try:
+                    self.pipeline = OnnxKokoroPipeline(self.lang_code, self.device)
+                except ImportError as onnx_exc:
+                    raise RuntimeError(missing_kokoro_message()) from onnx_exc
+            else:
+                selected_device = select_device(self.device)
+                LOG.info("Loading Kokoro; first use may download model and voice files.")
+                self.pipeline = KPipeline(lang_code=self.lang_code, repo_id=MODEL_REPO,
+                                          device=selected_device)
         return self.pipeline(*args, **kwargs)
 
     def close(self) -> None:
@@ -303,7 +419,7 @@ def file_hash(path: Path) -> str:
 
 def checkpoint_context(lang_code: str) -> dict:
     packages = {}
-    for package in ("kokoro", "misaki", "torch"):
+    for package in ("kokoro", "kokoro-onnx", "misaki", "torch", "onnxruntime-gpu"):
         try:
             packages[package] = version(package)
         except PackageNotFoundError:

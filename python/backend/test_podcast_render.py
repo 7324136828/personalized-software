@@ -12,6 +12,35 @@ from backend import podcast_render
 
 
 class PipelineCleanupTest(unittest.TestCase):
+    def test_onnx_auto_prefers_cuda_with_cpu_fallback(self) -> None:
+        runtime = SimpleNamespace(
+            preload_dlls=MagicMock(),
+            get_available_providers=MagicMock(
+                return_value=["CUDAExecutionProvider", "CPUExecutionProvider"]
+            ),
+        )
+        with patch.dict(
+            sys.modules,
+            {"onnxruntime": runtime, "torch": SimpleNamespace()},
+        ):
+            providers = podcast_render.onnx_execution_providers("auto")
+
+        self.assertEqual(providers, ["CUDAExecutionProvider", "CPUExecutionProvider"])
+        runtime.preload_dlls.assert_called_once_with()
+
+    def test_onnx_session_logs_errors_without_provider_warnings(self) -> None:
+        options = SimpleNamespace(log_severity_level=2)
+        runtime = SimpleNamespace(
+            SessionOptions=MagicMock(return_value=options),
+            set_default_logger_severity=MagicMock(),
+        )
+
+        result = podcast_render.onnx_session_options(runtime)
+
+        self.assertIs(result, options)
+        self.assertEqual(options.log_severity_level, 3)
+        runtime.set_default_logger_severity.assert_called_once_with(3)
+
     def test_close_drops_pipeline_and_empties_initialized_cuda_cache(self) -> None:
         cuda = SimpleNamespace(
             is_initialized=MagicMock(return_value=True),

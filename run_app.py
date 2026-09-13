@@ -15,6 +15,8 @@ ROOT = Path(__file__).resolve().parent
 REACT_DIR = ROOT / "react"
 BACKEND = ROOT / "python" / "backend" / "server.py"
 VENV_PYTHON = ROOT / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+REQUIRED_PYTHON = (3, 14, 6)
+REQUIRED_PYTHON_TEXT = ".".join(map(str, REQUIRED_PYTHON))
 
 
 class RunError(RuntimeError):
@@ -58,6 +60,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    if sys.version_info[:3] != REQUIRED_PYTHON:
+        raise RunError(
+            f"Python {REQUIRED_PYTHON_TEXT} is required; "
+            f"current interpreter is {sys.version.split()[0]}. Run setup.bat with Python "
+            f"{REQUIRED_PYTHON_TEXT} first."
+        )
     arguments = list(argv if argv is not None else sys.argv[1:])
     if arguments and arguments[0].lower() == "help":
         arguments[0] = "--help"

@@ -1,13 +1,21 @@
-kokoro
+# Kokoro 0.9.x and Misaki currently support Python 3.10-3.12 only.  The marker
+# prevents pip on Python 3.14 from backtracking to the incompatible 0.7.x stack.
+kokoro>=0.9.4; python_version < "3.13"
+# Upstream 0.6.1 still declares Python <3.14. setup_environment.py installs
+# this exact pure-Python wheel on Python 3.14 after an explicit compatibility test.
+kokoro-onnx==0.6.1; python_version >= "3.13" and python_version < "3.14"
+onnxruntime==1.26.0; python_version >= "3.13"
+# setup_environment.py installs CUDA-enabled PyTorch and ONNX Runtime using
+# their GPU-specific packages/index when an NVIDIA RTX GPU is detected.
 numpy
 imageio-ffmpeg
 
 # Ollama Learning System
-requests>=2.31.0
-pydantic>=2.0.0
+requests>=2.32
+pydantic>=2.7
 pandas>=2.0.0
 openpyxl>=3.1.0
 
 # Multi-LLM Provider Support
-openai>=1.0.0
-anthropic>=0.18.0
+openai>=1.50,<2.0
+anthropic>=0.40.0
