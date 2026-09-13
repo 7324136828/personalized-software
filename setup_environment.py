@@ -15,8 +15,14 @@ ROOT = Path(__file__).resolve().parent
 REACT_DIR = ROOT / "react"
 VENV_DIR = ROOT / ".venv"
 VENV_PYTHON = VENV_DIR / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+TTS_ROOT = ROOT / "python-kokoro"
+TTS_REQUIREMENTS = TTS_ROOT / "requirements.txt"
+TTS_VENV_DIR = ROOT / ".venv-tts"
+TTS_VENV_PYTHON = TTS_VENV_DIR / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 REQUIRED_PYTHON = (3, 14, 6)
 REQUIRED_PYTHON_TEXT = ".".join(map(str, REQUIRED_PYTHON))
+TTS_PYTHON = (3, 12)
+TTS_PYTHON_TEXT = ".".join(map(str, TTS_PYTHON))
 
 
 CUDA_TORCH_INDEX = "https://download.pytorch.org/whl/cu128"
@@ -29,10 +35,18 @@ CUDA_TORCH_PACKAGES = (
     f"torchaudio=={CUDA_TORCHAUDIO_VERSION}",
     f"torchvision=={CUDA_TORCHVISION_VERSION}",
 )
-KOKORO_ONNX_VERSION = "0.6.1"
-ONNX_GPU_VERSION = "1.26.0"
-ONNX_GPU_PACKAGE = f"onnxruntime-gpu=={ONNX_GPU_VERSION}"
 RTX_NAME = 'NVIDIA GeForce RTX'
+MAIN_TTS_PACKAGES = (
+    "kokoro",
+    "kokoro-onnx",
+    "misaki",
+    "torch",
+    "torchaudio",
+    "torchvision",
+    "transformers",
+    "onnxruntime",
+    "onnxruntime-gpu",
+)
 
 
 class SetupError(RuntimeError):
@@ -59,13 +73,13 @@ def run(command: Sequence[str | Path], *, cwd: Path = ROOT, quiet: bool = False)
         raise SetupError(f"Command failed with exit code {result.returncode}: {' '.join(rendered)}")
 
 
-def venv_is_healthy() -> bool:
-    if VENV_PYTHON.is_file() is False:
+def venv_is_healthy(python_executable: Path, expected: tuple[int, ...]) -> bool:
+    if python_executable.is_file() is False:
         return False
     try:
         result = subprocess.run(
             [
-                str(VENV_PYTHON),
+                str(python_executable),
                 "-c",
                 "import sys; print('.'.join(map(str, sys.version_info[:3])))",
             ],
@@ -77,7 +91,43 @@ def venv_is_healthy() -> bool:
         )
     except OSError:
         return False
-    return result.returncode == 0 and result.stdout.strip() == REQUIRED_PYTHON_TEXT
+    if result.returncode:
+        return False
+    try:
+        actual = tuple(int(part) for part in result.stdout.strip().split("."))
+    except ValueError:
+        return False
+    return actual[: len(expected)] == expected
+
+
+def python_312_command() -> list[str | Path]:
+    """Find a real Python 3.12 interpreter for the isolated TTS environment."""
+    candidates: list[list[str | Path]] = []
+    if sys.version_info[:2] == TTS_PYTHON:
+        candidates.append([sys.executable])
+    if os.name == "nt":
+        launcher = shutil.which("py")
+        if launcher:
+            candidates.append([launcher, "-3.12"])
+    else:
+        python = shutil.which("python3.12")
+        if python:
+            candidates.append([python])
+
+    for command in candidates:
+        result = subprocess.run(
+            [*map(str, command), "-c", "import sys; print(sys.version_info[:2])"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip() == "(3, 12)":
+            return command
+    raise SetupError(
+        "Python 3.12 is required for the isolated Kokoro service. "
+        "Install Python 3.12, ensure `py -3.12` works, and rerun setup.bat."
+    )
 
 
 def nvidia_gpu_names() -> list[str]:
@@ -97,38 +147,13 @@ def nvidia_gpu_names() -> list[str]:
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
-def install_kokoro_onnx(python_executable: Path) -> None:
-    """Install tested kokoro-onnx despite its conservative Python upper bound."""
-    print(
-        f"[setup] Installing kokoro-onnx {KOKORO_ONNX_VERSION} "
-        "with its Python-version metadata override."
-    )
-    run(
-        [
-            python_executable,
-            '-m',
-            'pip',
-            'install',
-            '--upgrade',
-            '--ignore-requires-python',
-            f'kokoro-onnx=={KOKORO_ONNX_VERSION}',
-        ]
-    )
-    verify = (
-        'from importlib.metadata import version; import kokoro_onnx; '
-        f'assert version("kokoro-onnx") == {KOKORO_ONNX_VERSION!r}; '
-        'print("kokoro-onnx", version("kokoro-onnx"))'
-    )
-    run([python_executable, '-c', verify])
-
-
 def install_cuda_pytorch(python_executable: Path) -> bool:
     """Install and verify CUDA-enabled PyTorch when an NVIDIA RTX GPU is present."""
     gpu_names = nvidia_gpu_names()
     rtx_names = [name for name in gpu_names if RTX_NAME.casefold() in name.casefold()]
     if not rtx_names:
         detected = ', '.join(gpu_names) if gpu_names else 'none'
-        print(f'[setup] No {RTX_NAME} GPU detected ({detected}); skipping CUDA PyTorch.')
+        print(f'[setup] No {RTX_NAME} GPU detected ({detected}); Kokoro will use CPU PyTorch.')
         return False
 
     rtx_display = ', '.join(rtx_names)
@@ -160,52 +185,10 @@ def install_cuda_pytorch(python_executable: Path) -> bool:
     return True
 
 
-def install_gpu_onnxruntime(python_executable: Path) -> None:
-    gpu_names = nvidia_gpu_names()
-    rtx_names = [name for name in gpu_names if RTX_NAME.casefold() in name.casefold()]
-    if not rtx_names:
-        detected = ', '.join(gpu_names) if gpu_names else 'none'
-        print(f'[setup] No {RTX_NAME} GPU detected ({detected}); using ONNX Runtime on CPU.')
-        return
-
-    rtx_display = ', '.join(rtx_names)
-    print(f'[setup] RTX GPU detected for ONNX Runtime: {rtx_display}')
-    print('[setup] Installing the CUDA 12.8 ONNX Runtime for Kokoro audio generation.')
-    # kokoro-onnx declares a dependency on the distribution named
-    # "onnxruntime", so its metadata must remain installed for `pip check`.
-    # Reinstall the GPU distribution last because both wheels expose the same
-    # import package. CUDA/cuDNN still come from PyTorch rather than duplicate
-    # NVIDIA runtime packages.
-    run(
-        [
-            python_executable,
-            '-m',
-            'pip',
-            'uninstall',
-            '--yes',
-            'onnxruntime-gpu',
-        ]
-    )
-    run(
-        [
-            python_executable,
-            '-m',
-            'pip',
-            'install',
-            '--upgrade',
-            ONNX_GPU_PACKAGE,
-        ]
-    )
-    verify = (
-        'import torch; '
-        'assert torch.cuda.is_available(), "CUDA is not available to PyTorch"; '
-        'import onnxruntime as ort; '
-        'ort.preload_dlls(); '
-        'providers = ort.get_available_providers(); '
-        'assert "CUDAExecutionProvider" in providers, providers; '
-        'print(ort.__version__, providers)'
-    )
-    run([python_executable, '-c', verify])
+def remove_main_tts_dependencies() -> None:
+    """Enforce that speech-model packages live only in `.venv-tts`."""
+    print("[setup] Removing TTS-only packages from the main environment.")
+    run([VENV_PYTHON, "-m", "pip", "uninstall", "--yes", *MAIN_TTS_PACKAGES])
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -227,6 +210,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     if not (ROOT / "requirements.txt").is_file():
         raise SetupError(f"requirements.txt was not found in {ROOT}")
+    if not TTS_REQUIREMENTS.is_file():
+        raise SetupError(f"Kokoro requirements were not found at {TTS_REQUIREMENTS}")
     if not (REACT_DIR / "package.json").is_file():
         raise SetupError(f"React project was not found in {REACT_DIR}")
 
@@ -236,7 +221,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"[setup] Python {sys.version.split()[0]}")
     print(f"[setup] Node {node_version}")
 
-    if not venv_is_healthy():
+    if not venv_is_healthy(VENV_PYTHON, REQUIRED_PYTHON):
         if VENV_DIR.exists():
             print(f"[setup] Removing virtual environment that does not use Python {REQUIRED_PYTHON_TEXT}")
             shutil.rmtree(VENV_DIR)
@@ -245,30 +230,57 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         print(f"[setup] Reusing virtual environment at {VENV_DIR}")
 
-    run([VENV_PYTHON, "-m", "pip", "install", "--upgrade", "pip"])
-    print("[setup] Installing Python dependencies; audio/ML packages may take several minutes.")
-    run([VENV_PYTHON, "-m", "pip", "install", "-r", ROOT / "requirements.txt"])
-    install_kokoro_onnx(VENV_PYTHON)
-    run([npm, "install"], cwd=REACT_DIR)
+    tts_creator = python_312_command()
+    if not venv_is_healthy(TTS_VENV_PYTHON, TTS_PYTHON):
+        if TTS_VENV_DIR.exists():
+            print(
+                f"[setup] Removing TTS environment that does not use Python {TTS_PYTHON_TEXT}"
+            )
+            shutil.rmtree(TTS_VENV_DIR)
+        print(
+            f"[setup] Creating isolated Python {TTS_PYTHON_TEXT} TTS environment "
+            f"at {TTS_VENV_DIR}"
+        )
+        run([*tts_creator, "-m", "venv", TTS_VENV_DIR])
+    else:
+        print(f"[setup] Reusing isolated TTS environment at {TTS_VENV_DIR}")
 
-    if install_cuda_pytorch(VENV_PYTHON):
-        install_gpu_onnxruntime(VENV_PYTHON)
+    run([VENV_PYTHON, "-m", "pip", "install", "--upgrade", "pip"])
+    print("[setup] Installing main Python dependencies.")
+    run([VENV_PYTHON, "-m", "pip", "install", "-r", ROOT / "requirements.txt"])
+    remove_main_tts_dependencies()
+    run([TTS_VENV_PYTHON, "-m", "pip", "install", "--upgrade", "pip"])
+    print("[setup] Installing isolated Kokoro dependencies; this may take several minutes.")
+    install_cuda_pytorch(TTS_VENV_PYTHON)
+    run([TTS_VENV_PYTHON, "-m", "pip", "install", "-r", TTS_REQUIREMENTS])
+    run([npm, "install"], cwd=REACT_DIR)
 
     if not args.skip_verify:
         run([VENV_PYTHON, "-m", "pip", "check"])
+        run([TTS_VENV_PYTHON, "-m", "pip", "check"])
         run([VENV_PYTHON, "-m", "compileall", "-q", ROOT / "python"])
+        run([TTS_VENV_PYTHON, "-m", "compileall", "-q", TTS_ROOT])
         run(
             [VENV_PYTHON, "-m", "unittest", "backend.test_server", "-v"],
             cwd=ROOT / "python",
         )
+        run(
+            [TTS_VENV_PYTHON, "-m", "unittest", "discover", "-s", TTS_ROOT, "-p", "test_*.py"],
+        )
         smoke_test = (
-            "import sys, tkinter, kokoro_onnx, numpy, pandas, pydantic, openai, anthropic; "
+            "import sys, tkinter, numpy, pandas, pydantic, openai, anthropic; "
             f"sys.path.insert(0, {str(ROOT / 'python')!r}); "
             "import ollama_learning; "
             "from ollama_learning.qanda import QAGenerator; "
             "print('Python imports OK')"
         )
         run([VENV_PYTHON, "-c", smoke_test])
+        tts_smoke_test = (
+            "import sys, kokoro, torch; "
+            "assert sys.version_info[:2] == (3, 12); "
+            "print('Kokoro imports OK', torch.__version__)"
+        )
+        run([TTS_VENV_PYTHON, "-c", tts_smoke_test])
         run([VENV_PYTHON, ROOT / "python/qanda_launcher.py", "--help"], quiet=True)
         run([npm, "run", "typecheck"], cwd=REACT_DIR)
         run([npm, "run", "build"], cwd=REACT_DIR)
@@ -277,6 +289,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     print("[setup] Start development: python run_app.py dev")
     activation = ".venv\\Scripts\\activate.bat" if os.name == "nt" else "source .venv/bin/activate"
     print(f"[setup] Activate Python: {activation}")
+    tts_activation = (
+        ".venv-tts\\Scripts\\activate.bat"
+        if os.name == "nt"
+        else "source .venv-tts/bin/activate"
+    )
+    print(f"[setup] Activate Kokoro Python: {tts_activation}")
     return 0
 
 

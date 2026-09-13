@@ -144,8 +144,10 @@ You can use different providers for different tasks. Each command accepts a `--p
 
 ## Installation
 
-With Python 3.14.6 installed, the setup command creates `.venv`, installs both
-Python and React dependencies, and runs the backend tests plus React checks.
+With Python 3.14.6 and Python 3.12 installed, the setup command creates `.venv`
+for the main application and `.venv-tts` for the isolated official Kokoro
+service. It installs the Python and React dependencies and runs both backend
+test suites plus the React checks.
 `setup.bat` is a one-line wrapper around `setup_environment.py`:
 
 ```bat
@@ -165,8 +167,11 @@ python -m venv .venv
 # Install Python and React dependencies
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
-# kokoro-onnx 0.6.1 is tested here on 3.14, but its metadata still says <3.14
-python -m pip install --ignore-requires-python kokoro-onnx==0.6.1
+
+# Create the isolated official-Kokoro environment with Python 3.12
+py -3.12 -m venv .venv-tts
+.venv-tts\Scripts\python -m pip install --upgrade pip
+.venv-tts\Scripts\python -m pip install -r python-kokoro\requirements.txt
 cd react
 npm install
 ```
@@ -180,22 +185,21 @@ The requirements file includes:
 - OpenAI support: `openai>=1.50,<2.0`
 - Claude support: `anthropic>=0.40.0`
 - Core functionality: `pydantic>=2.7`, `pandas`, `openpyxl`
-- Audio processing: `kokoro-onnx`, `numpy`, `imageio-ffmpeg`
+- Main-process audio handling: `numpy`, `imageio-ffmpeg`
+- Isolated TTS service: `kokoro==0.9.4` and CUDA-enabled PyTorch
 
-Kokoro's official package currently supports Python 3.10-3.12. Under the
-project's Python 3.14.6 runtime, the renderer uses the tested `kokoro-onnx 0.6.1`
-wheel instead, avoiding the incompatible Kokoro 0.7.x / spaCy / blis stack.
-Because 0.6.1 still advertises Python `<3.14`, the setup script applies pip's
-Python-version metadata override only to that package. The 326 MB
-ONNX model and 28 MB voice bundle are downloaded to `.checkpoints/podcasts` on
-first use. When an NVIDIA RTX GPU is detected, setup installs the pinned CUDA
-12.8 builds of PyTorch, TorchAudio, and TorchVision, followed by ONNX Runtime's
-CUDA provider. ONNX Runtime reuses PyTorch's CUDA and cuDNN libraries, so both
-the official Kokoro path and the Python 3.14 `kokoro-onnx` fallback can run on
-the GPU. The CPU and GPU ONNX distributions are pinned to the same version;
-the CPU distribution remains installed because `kokoro-onnx` requires that
-package name, while setup installs the GPU wheel last to select its runtime.
-Systems without a compatible NVIDIA GPU continue to use ONNX on CPU.
+The main Python 3.14 process never imports Kokoro, Misaki, Transformers, or
+PyTorch. `run.bat` starts `python-kokoro/server.py` with `.venv-tts` and the
+podcast renderer calls its OpenAI-compatible `POST /v1/audio/speech` route over
+loopback HTTP. When an NVIDIA RTX GPU is detected, setup installs the pinned
+CUDA 12.8 PyTorch build into `.venv-tts`; otherwise the service uses CPU
+PyTorch. An already-running compatible service at `KOKORO_BASE_URL` is reused.
+
+While podcast audio is rendering, inspect the current job and its recent log
+messages at `GET /api/generate_podcast/logs`. The optional `after` and `limit`
+query parameters support incremental polling, for example
+`/api/generate_podcast/logs?after=120&limit=200`. The in-memory log retains the
+latest 2,000 messages and resets when a new render job starts.
 
 ## Project Structure
 

@@ -167,6 +167,36 @@ class BackendTest(unittest.TestCase):
             server.podcast_render.render_library = original
             server.podcast_job.update(state="idle", startedAt=None, finishedAt=None, result=None)
 
+    def test_podcast_log_endpoint_returns_incremental_render_messages(self) -> None:
+        from backend import server
+
+        server.PODCAST_LOG_HANDLER.clear()
+        server.PODCAST_LOG.info("Rendering test turn %d", 1)
+
+        status, body = self.request("/api/generate_podcast/logs?limit=10")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(body["capacity"], server.PODCAST_LOG_CAPACITY)
+        self.assertEqual(body["entries"][-1]["level"], "INFO")
+        self.assertEqual(body["entries"][-1]["message"], "Rendering test turn 1")
+        self.assertIn("timestamp", body["entries"][-1])
+        self.assertIn("job", body)
+
+        last_id = body["nextAfter"]
+        server.PODCAST_LOG.warning("Second message")
+        _, incremental = self.request(
+            f"/api/generate_podcast/logs?after={last_id}&limit=10"
+        )
+        self.assertEqual(
+            [entry["message"] for entry in incremental["entries"]],
+            ["Second message"],
+        )
+
+    def test_podcast_log_endpoint_rejects_invalid_limit(self) -> None:
+        with self.assertRaises(HTTPError) as raised:
+            self.request("/api/generate_podcast/logs?limit=0")
+        self.assertEqual(raised.exception.code, 400)
+
 
 class NestedLayoutTest(unittest.TestCase):
     """The per-subject layout: new_output/<subject>/<kind>/<file>."""

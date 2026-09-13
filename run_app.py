@@ -3,20 +3,28 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Sequence
+from urllib.parse import urlsplit
 
 
 ROOT = Path(__file__).resolve().parent
 REACT_DIR = ROOT / "react"
 BACKEND = ROOT / "python" / "backend" / "server.py"
+TTS_BACKEND = ROOT / "python-kokoro" / "server.py"
 VENV_PYTHON = ROOT / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+TTS_VENV_PYTHON = ROOT / ".venv-tts" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 REQUIRED_PYTHON = (3, 14, 6)
 REQUIRED_PYTHON_TEXT = ".".join(map(str, REQUIRED_PYTHON))
+DEFAULT_KOKORO_BASE_URL = "http://127.0.0.1:8880/v1"
 
 
 class RunError(RuntimeError):
@@ -30,10 +38,89 @@ def executable(name: str) -> str:
     return candidate
 
 
-def run(command: Sequence[str | Path], *, cwd: Path = ROOT) -> int:
+def run(
+    command: Sequence[str | Path],
+    *,
+    cwd: Path = ROOT,
+    env: dict[str, str] | None = None,
+) -> int:
     rendered = [str(part) for part in command]
     print(f"[run] $ {' '.join(rendered)}", flush=True)
-    return subprocess.call(rendered, cwd=cwd)
+    return subprocess.call(rendered, cwd=cwd, env=env)
+
+
+def kokoro_health_url(base_url: str) -> str:
+    return f"{base_url.rstrip('/').removesuffix('/v1')}/health"
+
+
+def kokoro_is_healthy(base_url: str) -> bool:
+    try:
+        with urllib.request.urlopen(kokoro_health_url(base_url), timeout=1) as response:
+            body = json.loads(response.read().decode("utf-8"))
+        return response.status == 200 and body.get("service") == "python-kokoro"
+    except (
+        urllib.error.URLError,
+        TimeoutError,
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        AttributeError,
+    ):
+        return False
+
+
+def start_kokoro_server(base_url: str) -> subprocess.Popen[str] | None:
+    """Start the isolated service, or reuse a compatible service already running."""
+    if kokoro_is_healthy(base_url):
+        print(f"[run] Reusing Kokoro service at {base_url}", flush=True)
+        return None
+    if not TTS_VENV_PYTHON.is_file():
+        raise RunError(f"Kokoro environment not found at {TTS_VENV_PYTHON}; run setup.bat")
+    if not TTS_BACKEND.is_file():
+        raise RunError(f"Kokoro server was not found at {TTS_BACKEND}")
+
+    parsed = urlsplit(base_url)
+    if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost"}:
+        raise RunError(
+            f"KOKORO_BASE_URL {base_url!r} is unavailable and is not a managed loopback URL"
+        )
+    port = parsed.port or 80
+    device = os.environ.get("PODCAST_DEVICE", "auto")
+    command = [
+        str(TTS_VENV_PYTHON),
+        str(TTS_BACKEND),
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+        "--device",
+        device,
+    ]
+    print(f"[run] $ {' '.join(command)}", flush=True)
+    process = subprocess.Popen(command, cwd=ROOT, text=True)
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RunError(f"Kokoro service exited with code {process.returncode}")
+        if kokoro_is_healthy(base_url):
+            print(f"[run] Kokoro service ready at {base_url}", flush=True)
+            return process
+        time.sleep(0.25)
+    process.terminate()
+    process.wait(timeout=10)
+    raise RunError("Kokoro service did not become healthy within 60 seconds")
+
+
+def stop_process(process: subprocess.Popen[str] | None, label: str) -> None:
+    if process is None or process.poll() is not None:
+        return
+    print(f"[run] Stopping {label}...", flush=True)
+    process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -92,6 +179,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise RunError("npm install failed")
 
     backend_python = VENV_PYTHON if VENV_PYTHON.is_file() else Path(sys.executable)
+    kokoro_base_url = os.environ.get("KOKORO_BASE_URL", DEFAULT_KOKORO_BASE_URL).rstrip("/")
+    backend_env = os.environ.copy()
+    backend_env["KOKORO_BASE_URL"] = kokoro_base_url
     if args.command == "dev":
         command: list[str | Path] = [
             backend_python,
@@ -104,7 +194,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         ]
         if not args.no_open:
             command.append("--open")
-        return run(command)
+        tts_process = start_kokoro_server(kokoro_base_url)
+        try:
+            return run(command, env=backend_env)
+        finally:
+            stop_process(tts_process, "Kokoro service")
 
     print("[run] Building React for production...")
     if run([npm, "run", "build"], cwd=REACT_DIR):
@@ -118,7 +212,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     command = [backend_python, BACKEND, "--port", str(port), *host_args, *folder_args]
     if not args.no_open:
         command.append("--open")
-    return run(command)
+    tts_process = start_kokoro_server(kokoro_base_url)
+    try:
+        return run(command, env=backend_env)
+    finally:
+        stop_process(tts_process, "Kokoro service")
 
 
 if __name__ == "__main__":
