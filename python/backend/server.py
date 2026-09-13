@@ -673,7 +673,15 @@ def run_development(args: argparse.Namespace) -> int:
     api_url = f"http://127.0.0.1:{server.server_port}"
     print(f"[backend] API: {api_url}/api", flush=True)
 
-    command = ["npm.cmd" if os.name == "nt" else "npm", "run", "dev:frontend", "--", "--port", str(args.frontend_port)]
+    command = [
+        "npm.cmd" if os.name == "nt" else "npm",
+        "run",
+        "dev:frontend",
+        "--",
+        "--port",
+        str(args.frontend_port),
+        "--strictPort",
+    ]
     if is_wildcard_host(args.host):
         # Expose the Vite dev server on the LAN as well as the API.
         command += ["--host", "0.0.0.0"]

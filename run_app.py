@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -21,7 +22,33 @@ REACT_DIR = ROOT / "react"
 BACKEND = ROOT / "python" / "backend" / "server.py"
 TTS_BACKEND = ROOT / "python-kokoro" / "server.py"
 VENV_PYTHON = ROOT / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-TTS_VENV_PYTHON = ROOT / ".venv-tts" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+_ACTIVE_ENVIRONMENT = (
+    sys.prefix != getattr(sys, "base_prefix", sys.prefix)
+    or bool(os.environ.get("VIRTUAL_ENV"))
+    or bool(os.environ.get("CONDA_PREFIX"))
+)
+try:
+    _PROJECT_ENVIRONMENT = Path(sys.prefix).resolve() == (ROOT / ".venv").resolve()
+except OSError:
+    _PROJECT_ENVIRONMENT = False
+_TTS_CACHE_ROOT = Path(
+    os.environ.get("LOCALAPPDATA")
+    or os.environ.get("XDG_CACHE_HOME")
+    or Path.home() / ".cache"
+)
+TTS_VENV_DIR = (
+    Path(
+        os.environ.get(
+            "PERSONALIZED_SOFTWARE_TTS_VENV",
+            _TTS_CACHE_ROOT / "personalized-software" / ".venv-tts",
+        )
+    )
+    if _ACTIVE_ENVIRONMENT and not _PROJECT_ENVIRONMENT
+    else ROOT / ".venv-tts"
+)
+TTS_VENV_PYTHON = TTS_VENV_DIR / (
+    "Scripts/python.exe" if os.name == "nt" else "bin/python"
+)
 REQUIRED_PYTHON = (3, 14, 6)
 REQUIRED_PYTHON_TEXT = ".".join(map(str, REQUIRED_PYTHON))
 DEFAULT_KOKORO_BASE_URL = "http://127.0.0.1:8880/v1"
@@ -36,6 +63,26 @@ def executable(name: str) -> str:
     if candidate is None:
         raise RunError(f"{name} was not found on PATH; run setup.bat first")
     return candidate
+
+
+def in_active_environment() -> bool:
+    return _ACTIVE_ENVIRONMENT
+
+
+def available_port(start: int, reserved: set[int] | None = None) -> int:
+    if not 1 <= start <= 65535:
+        raise RunError("Ports must be between 1 and 65535")
+    reserved = reserved or set()
+    for port in range(start, 65536):
+        if port in reserved:
+            continue
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            try:
+                probe.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+        return port
+    raise RunError(f"No available TCP port was found at or above {start}")
 
 
 def run(
@@ -157,7 +204,29 @@ def main(argv: Sequence[str] | None = None) -> int:
     if arguments and arguments[0].lower() == "help":
         arguments[0] = "--help"
     args = parse_args(arguments)
-    port = args.port or (5174 if args.command == "dev" else 4173)
+    requested_frontend_port = args.port or (5174 if args.command == "dev" else 4173)
+    frontend_port = available_port(requested_frontend_port)
+    try:
+        requested_backend_port = int(os.environ.get("BACKEND_PORT", "8765"))
+    except ValueError as error:
+        raise RunError("BACKEND_PORT must be an integer") from error
+    backend_port = (
+        available_port(requested_backend_port, {frontend_port})
+        if args.command == "dev"
+        else frontend_port
+    )
+    if frontend_port != requested_frontend_port:
+        print(
+            f"[run] Port {requested_frontend_port} is busy; using frontend port "
+            f"{frontend_port}.",
+            flush=True,
+        )
+    if args.command == "dev" and backend_port != requested_backend_port:
+        print(
+            f"[run] Backend port {requested_backend_port} is busy; using "
+            f"{backend_port}.",
+            flush=True,
+        )
     host = "0.0.0.0" if args.lan and not args.host else args.host
     host_args = ["--host", host] if host else []
     folder_path = args.folder_path.expanduser().resolve() if args.folder_path else None
@@ -178,7 +247,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         if run([npm, "install"], cwd=REACT_DIR):
             raise RunError("npm install failed")
 
-    backend_python = VENV_PYTHON if VENV_PYTHON.is_file() else Path(sys.executable)
+    backend_python = (
+        Path(sys.executable)
+        if in_active_environment()
+        else VENV_PYTHON if VENV_PYTHON.is_file() else Path(sys.executable)
+    )
     kokoro_base_url = os.environ.get("KOKORO_BASE_URL", DEFAULT_KOKORO_BASE_URL).rstrip("/")
     backend_env = os.environ.copy()
     backend_env["KOKORO_BASE_URL"] = kokoro_base_url
@@ -187,8 +260,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             backend_python,
             BACKEND,
             "--dev",
+            "--port",
+            str(backend_port),
             "--frontend-port",
-            str(port),
+            str(frontend_port),
             *host_args,
             *folder_args,
         ]
@@ -209,7 +284,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"[run] Build ready at {REACT_DIR / 'dist'}")
         return 0
 
-    command = [backend_python, BACKEND, "--port", str(port), *host_args, *folder_args]
+    command = [
+        backend_python,
+        BACKEND,
+        "--port",
+        str(frontend_port),
+        *host_args,
+        *folder_args,
+    ]
     if not args.no_open:
         command.append("--open")
     tts_process = start_kokoro_server(kokoro_base_url)

@@ -17,7 +17,30 @@ VENV_DIR = ROOT / ".venv"
 VENV_PYTHON = VENV_DIR / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 TTS_ROOT = ROOT / "python-kokoro"
 TTS_REQUIREMENTS = TTS_ROOT / "requirements.txt"
-TTS_VENV_DIR = ROOT / ".venv-tts"
+_ACTIVE_ENVIRONMENT = (
+    sys.prefix != getattr(sys, "base_prefix", sys.prefix)
+    or bool(os.environ.get("VIRTUAL_ENV"))
+    or bool(os.environ.get("CONDA_PREFIX"))
+)
+try:
+    _PROJECT_ENVIRONMENT = Path(sys.prefix).resolve() == VENV_DIR.resolve()
+except OSError:
+    _PROJECT_ENVIRONMENT = False
+_TTS_CACHE_ROOT = Path(
+    os.environ.get("LOCALAPPDATA")
+    or os.environ.get("XDG_CACHE_HOME")
+    or Path.home() / ".cache"
+)
+TTS_VENV_DIR = (
+    Path(
+        os.environ.get(
+            "PERSONALIZED_SOFTWARE_TTS_VENV",
+            _TTS_CACHE_ROOT / "personalized-software" / ".venv-tts",
+        )
+    )
+    if _ACTIVE_ENVIRONMENT and not _PROJECT_ENVIRONMENT
+    else ROOT / ".venv-tts"
+)
 TTS_VENV_PYTHON = TTS_VENV_DIR / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 REQUIRED_PYTHON = (3, 14, 6)
 REQUIRED_PYTHON_TEXT = ".".join(map(str, REQUIRED_PYTHON))
@@ -185,10 +208,14 @@ def install_cuda_pytorch(python_executable: Path) -> bool:
     return True
 
 
-def remove_main_tts_dependencies() -> None:
+def remove_main_tts_dependencies(python_executable: Path) -> None:
     """Enforce that speech-model packages live only in `.venv-tts`."""
     print("[setup] Removing TTS-only packages from the main environment.")
-    run([VENV_PYTHON, "-m", "pip", "uninstall", "--yes", *MAIN_TTS_PACKAGES])
+    run([python_executable, "-m", "pip", "uninstall", "--yes", *MAIN_TTS_PACKAGES])
+
+
+def in_active_environment() -> bool:
+    return _ACTIVE_ENVIRONMENT
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -221,14 +248,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"[setup] Python {sys.version.split()[0]}")
     print(f"[setup] Node {node_version}")
 
-    if not venv_is_healthy(VENV_PYTHON, REQUIRED_PYTHON):
-        if VENV_DIR.exists():
-            print(f"[setup] Removing virtual environment that does not use Python {REQUIRED_PYTHON_TEXT}")
-            shutil.rmtree(VENV_DIR)
-        print(f"[setup] Creating virtual environment at {VENV_DIR}")
-        run([sys.executable, "-m", "venv", VENV_DIR])
+    if in_active_environment():
+        main_python = Path(sys.executable)
+        print(f"[setup] Using active Python environment at {sys.prefix}")
     else:
-        print(f"[setup] Reusing virtual environment at {VENV_DIR}")
+        if not venv_is_healthy(VENV_PYTHON, REQUIRED_PYTHON):
+            if VENV_DIR.exists():
+                print(f"[setup] Removing virtual environment that does not use Python {REQUIRED_PYTHON_TEXT}")
+                shutil.rmtree(VENV_DIR)
+            print(f"[setup] Creating virtual environment at {VENV_DIR}")
+            run([sys.executable, "-m", "venv", VENV_DIR])
+        else:
+            print(f"[setup] Reusing virtual environment at {VENV_DIR}")
+        main_python = VENV_PYTHON
 
     tts_creator = python_312_command()
     if not venv_is_healthy(TTS_VENV_PYTHON, TTS_PYTHON):
@@ -245,10 +277,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         print(f"[setup] Reusing isolated TTS environment at {TTS_VENV_DIR}")
 
-    run([VENV_PYTHON, "-m", "pip", "install", "--upgrade", "pip"])
+    run([main_python, "-m", "pip", "install", "--upgrade", "pip"])
     print("[setup] Installing main Python dependencies.")
-    run([VENV_PYTHON, "-m", "pip", "install", "-r", ROOT / "requirements.txt"])
-    remove_main_tts_dependencies()
+    run([main_python, "-m", "pip", "install", "-r", ROOT / "requirements.txt"])
+    remove_main_tts_dependencies(main_python)
     run([TTS_VENV_PYTHON, "-m", "pip", "install", "--upgrade", "pip"])
     print("[setup] Installing isolated Kokoro dependencies; this may take several minutes.")
     install_cuda_pytorch(TTS_VENV_PYTHON)
@@ -256,12 +288,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     run([npm, "install"], cwd=REACT_DIR)
 
     if not args.skip_verify:
-        run([VENV_PYTHON, "-m", "pip", "check"])
+        run([main_python, "-m", "pip", "check"])
         run([TTS_VENV_PYTHON, "-m", "pip", "check"])
-        run([VENV_PYTHON, "-m", "compileall", "-q", ROOT / "python"])
+        run([main_python, "-m", "compileall", "-q", ROOT / "python"])
         run([TTS_VENV_PYTHON, "-m", "compileall", "-q", TTS_ROOT])
         run(
-            [VENV_PYTHON, "-m", "unittest", "backend.test_server", "-v"],
+            [main_python, "-m", "unittest", "backend.test_server", "-v"],
             cwd=ROOT / "python",
         )
         run(
@@ -274,25 +306,28 @@ def main(argv: Sequence[str] | None = None) -> int:
             "from ollama_learning.qanda import QAGenerator; "
             "print('Python imports OK')"
         )
-        run([VENV_PYTHON, "-c", smoke_test])
+        run([main_python, "-c", smoke_test])
         tts_smoke_test = (
             "import sys, kokoro, torch; "
             "assert sys.version_info[:2] == (3, 12); "
             "print('Kokoro imports OK', torch.__version__)"
         )
         run([TTS_VENV_PYTHON, "-c", tts_smoke_test])
-        run([VENV_PYTHON, ROOT / "python/qanda_launcher.py", "--help"], quiet=True)
+        run([main_python, ROOT / "python/qanda_launcher.py", "--help"], quiet=True)
         run([npm, "run", "typecheck"], cwd=REACT_DIR)
         run([npm, "run", "build"], cwd=REACT_DIR)
 
     print("\n[setup] Environment ready.")
     print("[setup] Start development: python run_app.py dev")
-    activation = ".venv\\Scripts\\activate.bat" if os.name == "nt" else "source .venv/bin/activate"
-    print(f"[setup] Activate Python: {activation}")
+    if in_active_environment():
+        print(f"[setup] Main dependencies installed in active environment: {sys.prefix}")
+    else:
+        activation = ".venv\\Scripts\\activate.bat" if os.name == "nt" else "source .venv/bin/activate"
+        print(f"[setup] Activate Python: {activation}")
     tts_activation = (
-        ".venv-tts\\Scripts\\activate.bat"
+        f"{TTS_VENV_DIR}\\Scripts\\activate.bat"
         if os.name == "nt"
-        else "source .venv-tts/bin/activate"
+        else f"source {TTS_VENV_DIR}/bin/activate"
     )
     print(f"[setup] Activate Kokoro Python: {tts_activation}")
     return 0

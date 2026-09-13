@@ -1,1 +1,1 @@
-@python "%~dp0run_app.py" serve --lan %*
+@call "%~dp0run.bat" serve --lan %*
