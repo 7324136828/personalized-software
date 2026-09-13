@@ -11,11 +11,13 @@ server that never renders a podcast never pays for it.
 
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import logging
 import re
 import subprocess
+import sys
 import tempfile
 import wave
 from dataclasses import asdict, dataclass
@@ -251,9 +253,11 @@ class LazyPipeline:
         self.lang_code = lang_code
         self.device = device
         self.pipeline = None
+        self.started = False
 
     def __call__(self, *args, **kwargs):
         if self.pipeline is None:
+            self.started = True
             try:
                 from kokoro import KPipeline
             except ImportError as exc:
@@ -265,6 +269,28 @@ class LazyPipeline:
             self.pipeline = KPipeline(lang_code=self.lang_code, repo_id=MODEL_REPO,
                                       device=selected_device)
         return self.pipeline(*args, **kwargs)
+
+    def close(self) -> None:
+        """Drop the model and return unused CUDA allocations to the driver."""
+        if not self.started:
+            return
+
+        # Remove our last long-lived model reference before collecting cycles and
+        # flushing PyTorch's allocator.  Use sys.modules so cleanup never imports
+        # the heavy stack for a batch that only reused cached audio.
+        self.pipeline = None
+        self.started = False
+        gc.collect()
+        torch = sys.modules.get("torch")
+        cuda = getattr(torch, "cuda", None) if torch is not None else None
+        try:
+            if cuda is not None and cuda.is_initialized():
+                cuda.empty_cache()
+                LOG.info("Released Kokoro CUDA memory.")
+        except (RuntimeError, AssertionError) as exc:
+            # A failed CUDA context must not turn an otherwise completed render
+            # into a failed background job.
+            LOG.warning("Could not release Kokoro CUDA cache: %s", exc)
 
 
 def file_hash(path: Path) -> str:
@@ -407,26 +433,31 @@ def render_library(episode_paths: list[Path], *, fmt: str = "mp3",
     generated: list[str] = []
     skipped: list[str] = []
     failed: list[dict[str, str]] = []
-    for source in episode_paths:
-        source = Path(source)
-        output = source.with_suffix(f".{fmt}")
-        try:
-            if (not refresh_all and output.is_file()
-                    and output.stat().st_mtime >= source.stat().st_mtime):
-                skipped.append(output.name)
-                continue
-            episode = load_episode(source)
-            turns = plan_episode(episode, source.parent)
-            source_key = hashlib.sha256(str(source.resolve()).encode("utf-8")).hexdigest()[:16]
-            per_episode_checkpoints = (
-                None if checkpoint_dir is None
-                else Path(checkpoint_dir) / f"{source.stem}-{source_key}"
-            )
-            duration = render_episode(episode, turns, output, lang_code, device,
-                                      bitrate, per_episode_checkpoints, restart, pipeline)
-            LOG.info("Saved %s (%.1f minutes)", output, duration / 60)
-            generated.append(output.name)
-        except (OSError, ValueError, RuntimeError, ImportError, EOFError, wave.Error) as exc:
-            LOG.error("%s: %s", source.name, exc)
-            failed.append({"file": source.name, "error": str(exc)})
+    try:
+        for source in episode_paths:
+            source = Path(source)
+            output = source.with_suffix(f".{fmt}")
+            try:
+                if (not refresh_all and output.is_file()
+                        and output.stat().st_mtime >= source.stat().st_mtime):
+                    skipped.append(output.name)
+                    continue
+                episode = load_episode(source)
+                turns = plan_episode(episode, source.parent)
+                source_key = hashlib.sha256(
+                    str(source.resolve()).encode("utf-8")
+                ).hexdigest()[:16]
+                per_episode_checkpoints = (
+                    None if checkpoint_dir is None
+                    else Path(checkpoint_dir) / f"{source.stem}-{source_key}"
+                )
+                duration = render_episode(episode, turns, output, lang_code, device,
+                                          bitrate, per_episode_checkpoints, restart, pipeline)
+                LOG.info("Saved %s (%.1f minutes)", output, duration / 60)
+                generated.append(output.name)
+            except (OSError, ValueError, RuntimeError, ImportError, EOFError, wave.Error) as exc:
+                LOG.error("%s: %s", source.name, exc)
+                failed.append({"file": source.name, "error": str(exc)})
+    finally:
+        pipeline.close()
     return {"generated": generated, "skipped": skipped, "failed": failed}
