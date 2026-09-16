@@ -94,6 +94,10 @@ body {
 }
 .toolbar .divider { width: 1px; height: 22px; background: var(--line); }
 .toolbar .spacer { flex: 1; }
+.audio-error {
+  max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--bad); font-size: 0.82rem;
+}
 
 .shell-body { display: flex; flex: 1; min-height: 0; }
 

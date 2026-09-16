@@ -307,6 +307,11 @@ python python/ollama_learning/flashcards.py \
   --model qwen2.5
 ```
 
+In the React Flashcards viewer, click **Play** to generate Kokoro narration for
+both sides of every card in the selected set. The current front or back is read
+as cards are flipped or changed. Generated WAV files are cached under the
+operating system's temporary `personalized-software/flashcard-audio` directory.
+
 ### Quizzes
 
 Create a multiple-choice quiz:
@@ -661,7 +666,7 @@ names) to open a viewer directly.
 
 Flashcards, quizzes, Q&A sets, slide decks, and podcasts include interactive controls:
 
-- **Flashcards**: Space to flip, arrows to navigate
+- **Flashcards**: Space to flip, arrows to navigate, and cached Kokoro narration
 - **Quizzes**: Multiple choice with immediate feedback
 - **Q&A**: Free-text responses with temporary autosave and JSON export
 - **Slides**: Arrow keys to navigate, space for notes

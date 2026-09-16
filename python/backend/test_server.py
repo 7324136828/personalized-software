@@ -43,6 +43,7 @@ class BackendTest(unittest.TestCase):
         self.responses = root / "responses"
         self.static = root / "dist"
         self.archives = root / "workspace-archives"
+        self.flashcard_audio = root / "flashcard-audio"
         (self.output / "qandas").mkdir(parents=True)
         (self.output / 'podcasts').mkdir(parents=True)
         self.static.mkdir()
@@ -58,6 +59,7 @@ class BackendTest(unittest.TestCase):
             self.responses,
             self.static,
             self.archives,
+            self.flashcard_audio,
         )
         (self.output / 'podcasts' / 'sample.json').write_text(
             json.dumps(
@@ -232,6 +234,31 @@ class BackendTest(unittest.TestCase):
             self.assertEqual(response.status, 200)
             self.assertEqual(response.headers.get_content_type(), 'audio/mpeg')
             self.assertEqual(response.read(), b'ID3-test-audio')
+
+    def test_flashcard_audio_is_generated_cached_and_served(self) -> None:
+        cards = [
+            {"front": "What is credibility?", "back": "A measure of predictive reliability."},
+            {"front": "What is severity?", "back": "Loss size conditional on an event."},
+        ]
+        wav = b"RIFF-test-wav"
+
+        with patch("backend.server.podcast_render.synthesize_wav", return_value=wav) as synthesize:
+            status, generated = self.request(
+                "/api/flashcards/audio",
+                "POST",
+                {"cards": cards},
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(len(generated["cards"]), 2)
+            self.assertEqual(synthesize.call_count, 4)
+
+            self.request("/api/flashcards/audio", "POST", {"cards": cards})
+            self.assertEqual(synthesize.call_count, 4)
+
+        with urlopen(self.base + generated["cards"][0]["front"]) as response:
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.headers.get_content_type(), "audio/wav")
+            self.assertEqual(response.read(), wav)
 
     def test_qanda_session_round_trip(self) -> None:
         status, session = self.request(

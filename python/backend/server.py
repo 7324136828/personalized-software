@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 from collections import deque
+import hashlib
 import ipaddress
 import json
 import logging
@@ -54,13 +55,21 @@ DEFAULT_RESPONSE_DIR = Path(tempfile.gettempdir()) / "personalized-software" / "
 DEFAULT_WORKSPACE_ARCHIVE_DIR = (
     Path(tempfile.gettempdir()) / "personalized-software" / "workspaces"
 )
+DEFAULT_FLASHCARD_AUDIO_DIR = (
+    Path(tempfile.gettempdir()) / "personalized-software" / "flashcard-audio"
+)
 PODCAST_CHECKPOINT_DIR = PROJECT_ROOT / ".checkpoints" / "podcasts"
 PODCAST_DEVICE = os.environ.get("PODCAST_DEVICE", "auto")
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
 MAX_WORKSPACE_ARCHIVE_BYTES = 512 * 1024 * 1024
 MAX_WORKSPACE_EXTRACTED_BYTES = 2 * 1024 * 1024 * 1024
 MAX_WORKSPACE_ARCHIVE_FILES = 20_000
+MAX_FLASHCARD_AUDIO_CARDS = 1_000
+MAX_FLASHCARD_AUDIO_CHARACTERS = 1_000_000
 PODCAST_LOG_CAPACITY = 2_000
+FLASHCARD_FRONT_VOICE = os.environ.get("FLASHCARD_FRONT_VOICE", "af_heart")
+FLASHCARD_BACK_VOICE = os.environ.get("FLASHCARD_BACK_VOICE", "af_heart")
+FLASHCARD_AUDIO_LOCK = threading.Lock()
 
 KINDS: dict[str, tuple[str, ...]] = {
     "quizzes": (),
@@ -361,6 +370,78 @@ def workspace_archive_collection(archive_dir: Path, identifier: str) -> Path:
     if not workspace_directories(collection):
         raise ValueError("The uploaded workspace no longer contains any output folders")
     return collection
+
+
+def _flashcard_audio_path(cache_dir: Path, text: str, voice: str) -> Path:
+    cache_key = hashlib.sha256(
+        json.dumps(
+            {
+                "text": text,
+                "voice": voice,
+                "speed": 1.0,
+                "language": "a",
+                "kokoro": podcast_render.KOKORO_SERVICE_VERSION,
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    return cache_dir / f"{cache_key}.wav"
+
+
+def generate_flashcard_audio(payload: Any, cache_dir: Path) -> dict[str, Any]:
+    """Synthesize and cache both sides of every supplied flashcard."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("cards"), list):
+        raise ValueError("cards must be an array")
+    raw_cards = payload["cards"]
+    if not raw_cards:
+        raise ValueError("cards must not be empty")
+    if len(raw_cards) > MAX_FLASHCARD_AUDIO_CARDS:
+        raise ValueError(f"At most {MAX_FLASHCARD_AUDIO_CARDS} flashcards can be narrated")
+
+    cards: list[tuple[str, str]] = []
+    total_characters = 0
+    for index, card in enumerate(raw_cards):
+        if not isinstance(card, dict):
+            raise ValueError(f"cards[{index}] must be an object")
+        front = card.get("front")
+        back = card.get("back")
+        if not isinstance(front, str) or not front.strip():
+            raise ValueError(f"cards[{index}].front must be a non-empty string")
+        if not isinstance(back, str) or not back.strip():
+            raise ValueError(f"cards[{index}].back must be a non-empty string")
+        front = front.strip()
+        back = back.strip()
+        total_characters += len(front) + len(back)
+        cards.append((front, back))
+    if total_characters > MAX_FLASHCARD_AUDIO_CHARACTERS:
+        raise ValueError("The flashcard text exceeds the narration limit")
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    result: list[dict[str, str]] = []
+    with FLASHCARD_AUDIO_LOCK:
+        for front, back in cards:
+            urls: dict[str, str] = {}
+            for side, text, voice in (
+                ("front", front, FLASHCARD_FRONT_VOICE),
+                ("back", back, FLASHCARD_BACK_VOICE),
+            ):
+                audio_path = _flashcard_audio_path(cache_dir, text, voice)
+                if not audio_path.is_file():
+                    wav = podcast_render.synthesize_wav(text, voice=voice)
+                    temporary = audio_path.with_suffix(f".{uuid.uuid4().hex}.tmp")
+                    try:
+                        temporary.write_bytes(wav)
+                        temporary.replace(audio_path)
+                    finally:
+                        temporary.unlink(missing_ok=True)
+                urls[side] = f"/api/flashcards/audio/{audio_path.name}"
+            result.append(urls)
+    return {
+        "cards": result,
+        "frontVoice": FLASHCARD_FRONT_VOICE,
+        "backVoice": FLASHCARD_BACK_VOICE,
+    }
 
 
 def is_loopback_client(host: str) -> bool:
@@ -734,12 +815,14 @@ class LearningRequestHandler(SimpleHTTPRequestHandler):
         response_dir: Path,
         static_dir: Path,
         workspace_archive_dir: Path,
+        flashcard_audio_dir: Path,
         **kwargs: Any,
     ) -> None:
         self.content_state = content_state
         self.response_dir = response_dir
         self.static_dir = static_dir
         self.workspace_archive_dir = workspace_archive_dir
+        self.flashcard_audio_dir = flashcard_audio_dir
         super().__init__(*args, directory=str(static_dir), **kwargs)
 
     @property
@@ -826,6 +909,9 @@ class LearningRequestHandler(SimpleHTTPRequestHandler):
             if path == "/api/content/manifest":
                 self._json(HTTPStatus.OK, build_manifest(self.output_dir))
                 return
+            if path.startswith("/api/flashcards/audio/"):
+                self._serve_flashcard_audio(path.removeprefix("/api/flashcards/audio/"))
+                return
             if path.startswith("/api/content/"):
                 self._serve_content(path.removeprefix("/api/content/"))
                 return
@@ -861,6 +947,18 @@ class LearningRequestHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
         path = unquote(urlsplit(self.path).path)
+        if path == "/api/flashcards/audio":
+            try:
+                generated = generate_flashcard_audio(
+                    self._read_json(),
+                    self.flashcard_audio_dir,
+                )
+                self._json(HTTPStatus.OK, generated)
+            except ValueError as error:
+                self._error(HTTPStatus.BAD_REQUEST, str(error))
+            except RuntimeError as error:
+                self._error(HTTPStatus.SERVICE_UNAVAILABLE, str(error))
+            return
         if path == "/api/workspace/upload":
             if not self._workspace_selection_allowed():
                 self._drain_body()
@@ -1026,6 +1124,20 @@ class LearningRequestHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _serve_flashcard_audio(self, file_name: str) -> None:
+        if not re.fullmatch(r"[0-9a-f]{64}\.wav", file_name):
+            raise FileNotFoundError(file_name)
+        path = safe_child(self.flashcard_audio_dir, file_name)
+        if not path.is_file():
+            raise FileNotFoundError(file_name)
+        body = path.read_bytes()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "audio/wav")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        self.end_headers()
+        self.wfile.write(body)
+
     def _serve_static(self, path: str) -> None:
         if not self.static_dir.is_dir():
             self._error(
@@ -1046,6 +1158,7 @@ def create_server(
     response_dir: Path,
     static_dir: Path,
     workspace_archive_dir: Path = DEFAULT_WORKSPACE_ARCHIVE_DIR,
+    flashcard_audio_dir: Path = DEFAULT_FLASHCARD_AUDIO_DIR,
 ) -> ThreadingHTTPServer:
     content_state = ContentState(output_dir)
     handler = partial(
@@ -1054,6 +1167,7 @@ def create_server(
         response_dir=response_dir.resolve(),
         static_dir=static_dir.resolve(),
         workspace_archive_dir=workspace_archive_dir.resolve(),
+        flashcard_audio_dir=flashcard_audio_dir.resolve(),
     )
     return ThreadingHTTPServer((host, port), handler)
 

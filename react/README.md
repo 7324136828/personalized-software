@@ -103,6 +103,7 @@ response, static, or port location.
 ## Keyboard
 
 - **Quiz** — click to answer, submit, then advance
-- **Flashcards** — space flips then advances, ← → navigate, `j` known, `f` review
+- **Flashcards** — space flips then advances, ← → navigate, `j` known, `f` review,
+  and **Play** generates cached Kokoro narration for both sides
 - **Slides** — ← → or space to move, F5 present, Esc exit
 - **Mind maps** — click a node to collapse/expand, drag to pan, Ctrl+wheel zoom

@@ -6,7 +6,7 @@
  * mastered / not-mastered marking and reshuffle-on-completion from the second.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { LibraryShell, DetailRow } from "../components/LibraryShell";
 import { req, ValidationError } from "../lib/content";
 import { shuffle } from "../lib/format";
@@ -40,6 +40,22 @@ function parseSet(raw: Record<string, unknown>, where: string): FlashcardSet {
 
 type Grade = "known" | "review";
 
+interface CardAudio {
+  front: string;
+  back: string;
+}
+
+interface FlashcardAudioResponse {
+  cards: CardAudio[];
+  frontVoice: string;
+  backVoice: string;
+  error?: string;
+}
+
+function cardAudioKey(card: Flashcard): string {
+  return JSON.stringify([card.front, card.back]);
+}
+
 export function FlashcardsView() {
   const lib = useLibrary<FlashcardSet>("flashcards", parseSet);
   const [tag, setTag] = useState("(all)");
@@ -50,6 +66,11 @@ export function FlashcardsView() {
   const [revealed, setRevealed] = useState(false);
   const [grades, setGrades] = useState<Record<number, Grade>>({});
   const [done, setDone] = useState(false);
+  const [cardAudio, setCardAudio] = useState<Record<string, CardAudio>>({});
+  const [narrating, setNarrating] = useState(false);
+  const [audioLoading, setAudioLoading] = useState(false);
+  const [audioError, setAudioError] = useState("");
+  const audioPlayer = useRef<HTMLAudioElement | null>(null);
 
   const set = lib.selected?.doc ?? null;
 
@@ -77,6 +98,12 @@ export function FlashcardsView() {
   );
 
   useEffect(() => {
+    audioPlayer.current?.pause();
+    audioPlayer.current = null;
+    setCardAudio({});
+    setNarrating(false);
+    setAudioLoading(false);
+    setAudioError("");
     setTag("(all)");
     setType("(all)");
     rebuild(set, "(all)", "(all)", doShuffle);
@@ -86,6 +113,72 @@ export function FlashcardsView() {
   const card = deck[index] ?? null;
   const known = Object.values(grades).filter((g) => g === "known").length;
   const toReview = Object.values(grades).filter((g) => g === "review").length;
+
+  const stopAudio = useCallback(() => {
+    audioPlayer.current?.pause();
+    audioPlayer.current = null;
+  }, []);
+
+  const playAudio = useCallback(
+    (url: string) => {
+      stopAudio();
+      setAudioError("");
+      const player = new Audio(url);
+      audioPlayer.current = player;
+      void player.play().catch((error: Error) => {
+        setAudioError(`Audio playback failed: ${error.message}`);
+      });
+    },
+    [stopAudio],
+  );
+
+  useEffect(() => {
+    if (!narrating || !card || done) {
+      if (done) stopAudio();
+      return;
+    }
+    const audio = cardAudio[cardAudioKey(card)];
+    if (audio) playAudio(revealed ? audio.back : audio.front);
+  }, [card, cardAudio, done, narrating, playAudio, revealed, stopAudio]);
+
+  useEffect(() => () => stopAudio(), [stopAudio]);
+
+  const toggleNarration = async () => {
+    if (narrating) {
+      setNarrating(false);
+      stopAudio();
+      return;
+    }
+    if (!set) return;
+    setAudioLoading(true);
+    setAudioError("");
+    try {
+      const response = await fetch(`${import.meta.env.BASE_URL}api/flashcards/audio`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          cards: set.cards.map(({ front, back }) => ({ front, back })),
+        }),
+      });
+      const body = (await response.json()) as FlashcardAudioResponse;
+      if (!response.ok) {
+        throw new Error(body.error ?? `Narration generation failed (${response.status})`);
+      }
+      if (body.cards.length !== set.cards.length) {
+        throw new Error("Narration response did not match the flashcard set");
+      }
+      const generated: Record<string, CardAudio> = {};
+      set.cards.forEach((item, itemIndex) => {
+        generated[cardAudioKey(item)] = body.cards[itemIndex];
+      });
+      setCardAudio(generated);
+      setNarrating(true);
+    } catch (error) {
+      setAudioError((error as Error).message);
+    } finally {
+      setAudioLoading(false);
+    }
+  };
 
   const advance = useCallback(() => {
     if (index < deck.length - 1) {
@@ -207,6 +300,20 @@ export function FlashcardsView() {
       <button type="button" onClick={reviewMissed} disabled={toReview === 0}>
         Review missed ({toReview})
       </button>
+      <button
+        type="button"
+        className={narrating ? "primary" : undefined}
+        onClick={() => void toggleNarration()}
+        disabled={!set || audioLoading}
+        title="Generate Kokoro narration and play the visible side"
+      >
+        {audioLoading ? "Generating audio..." : narrating ? "Stop audio" : "▶ Play"}
+      </button>
+      {audioError ? (
+        <span className="audio-error" role="alert" title={audioError}>
+          {audioError}
+        </span>
+      ) : null}
     </>
   );
 
