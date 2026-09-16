@@ -5,8 +5,7 @@ A comprehensive AI learning system that supports multiple LLM providers (Ollama,
 ## Quick Start (React viewers)
 
 A batch script at the repository root builds the React viewers and starts a
-local Python backend (`python/backend/server.py`) that serves generated content
-directly from `new_output/`:
+local Python backend (`python/backend/server.py`):
 
 ```bat
 run.bat
@@ -16,8 +15,14 @@ It installs dependencies on first run, builds for production, serves on
 http://localhost:4173, and opens the Q&A view. Use `run.bat dev` for hot reload,
 `run.bat build` to build without serving, or `run.bat help` for all options.
 
-To serve generated content from another workspace, pass its parent folder. The
-server will read that folder's `output` directory:
+After the website opens, click **Choose workspace** in its header. You can select
+one workspace that contains `output`, or a parent folder whose immediate
+subfolders each contain `output`. Use the adjacent dropdown to switch between
+the discovered outputs. **Upload ZIP** imports the same folder structure into
+the operating system's temporary `personalized-software/workspaces` directory.
+**Load existing workspace** reopens any previously uploaded ZIP from that
+temporary library. For scripts and other non-interactive use, you can set the
+initial workspace with:
 
 ```bat
 run.bat serve --folder-path C:\path\to\workspace

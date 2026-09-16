@@ -291,6 +291,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         run([main_python, "-m", "pip", "check"])
         run([TTS_VENV_PYTHON, "-m", "pip", "check"])
         run([main_python, "-m", "compileall", "-q", ROOT / "python"])
+        run([main_python, "-m", "unittest", "test_run_app", "-v"])
         run([TTS_VENV_PYTHON, "-m", "compileall", "-q", TTS_ROOT])
         run(
             [main_python, "-m", "unittest", "backend.test_server", "-v"],
