@@ -15,18 +15,15 @@ It installs dependencies on first run, builds for production, serves on
 http://localhost:4173, and opens the Q&A view. Use `run.bat dev` for hot reload,
 `run.bat build` to build without serving, or `run.bat help` for all options.
 
-After the website opens, click **Choose workspace** in its header. You can select
-one workspace that contains `output`, or a parent folder whose immediate
-subfolders each contain `output`. Use the adjacent dropdown to switch between
-the discovered outputs. **Upload ZIP** imports the same folder structure into
-the operating system's temporary `personalized-software/workspaces` directory.
-**Load existing workspace** reopens any previously uploaded ZIP from that
-temporary library. For scripts and other non-interactive use, you can set the
-initial workspace with:
+After the website opens, use **Upload ZIP** to import a workspace collection.
+The ZIP may contain one workspace with `output`, or immediate subfolders that
+each contain `output`. Use the output dropdown to switch between them.
+**Load existing workspace** reopens any previously uploaded ZIP from the
+operating system's temporary `personalized-software/workspaces` directory.
 
-```bat
-run.bat serve --folder-path C:\path\to\workspace
-```
+Use `run.bat --lan` to open the site from another computer on the same network.
+Remote sessions can switch outputs, upload ZIPs, and load existing uploads.
+
 No `npm run sync` step is needed. See `react/README.md` for details.
 
 ## Features

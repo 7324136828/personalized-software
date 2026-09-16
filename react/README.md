@@ -13,17 +13,19 @@ run.bat dev
 ```
 
 This starts the backend and Vite together, then opens
-http://localhost:5174/#/qanda. Click **Choose workspace** in the website header
-and select either one workspace or a parent folder containing several workspace
-subfolders. Each immediate subfolder with an `output` directory appears in the
-dropdown beside the button. Newly generated content appears after clicking
-**Reload content**.
+http://localhost:5174/#/qanda. Upload a workspace ZIP or load a previously
+uploaded ZIP from the website header. Each immediate subfolder with an `output`
+directory appears in the output dropdown. Newly generated content appears after
+clicking **Reload content**.
 
 Use **Upload ZIP** to extract a workspace collection into the operating system's
 temporary `personalized-software/workspaces` directory. Uploaded archives may
 be up to 512 MB compressed, 2 GB extracted, and 20,000 files; unsafe paths,
 symbolic links, and encrypted ZIPs are rejected. **Load existing workspace**
 lists valid uploads that are still present in that temporary directory.
+
+When the app is started with `run.bat --lan`, another computer can also use the
+output dropdown, **Upload ZIP**, and **Load existing workspace**.
 
 For a production build and local server, run `run.bat`. Use `run.bat build` to
 build without serving and `run.bat help` for all options.

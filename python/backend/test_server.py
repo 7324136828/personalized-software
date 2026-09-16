@@ -19,20 +19,12 @@ from backend.server import DEFAULT_OUTPUT_DIR, create_server, parse_args
 
 
 class ArgumentTest(unittest.TestCase):
-    def test_folder_path_uses_its_output_directory(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            folder = Path(temporary)
-            args = parse_args(["--folder-path", str(folder)])
-
-        self.assertEqual(args.folder_path, folder.resolve())
-        self.assertEqual(args.output_dir, folder.resolve() / "output")
-
     def test_default_output_directory_is_unchanged(self) -> None:
         self.assertEqual(parse_args([]).output_dir, DEFAULT_OUTPUT_DIR)
 
-    def test_folder_path_and_output_dir_are_mutually_exclusive(self) -> None:
+    def test_folder_path_is_not_supported(self) -> None:
         with self.assertRaises(SystemExit):
-            parse_args(["--folder-path", "workspace", "--output-dir", "content"])
+            parse_args(["--folder-path", "workspace"])
 
 
 class BackendTest(unittest.TestCase):
@@ -117,64 +109,6 @@ class BackendTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(manifest["kinds"]["qandas"][0]["file"], "reflection.json")
 
-    def test_workspace_collection_can_be_selected_and_switched(self) -> None:
-        collection = Path(self.temporary.name) / "selected-collection"
-        for name in ("alpha", "beta"):
-            qandas = collection / name / "output" / "qandas"
-            qandas.mkdir(parents=True)
-            (qandas / f"{name}.json").write_text(
-                json.dumps(
-                    {"title": name.title(), "description": "New", "questions": ["How?"]}
-                ),
-                encoding="utf-8",
-            )
-
-        with patch("backend.server.select_workspace_folder", return_value=collection):
-            status, selection = self.request("/api/workspace/select", "POST", {})
-
-        self.assertEqual(status, 200)
-        self.assertFalse(selection["cancelled"])
-        self.assertEqual(Path(selection["collectionDirectory"]), collection)
-        self.assertEqual(selection["activeWorkspace"], "alpha")
-        self.assertEqual(
-            [workspace["name"] for workspace in selection["workspaces"]],
-            ["alpha", "beta"],
-        )
-
-        _, manifest = self.request("/api/content/manifest")
-        self.assertEqual(
-            [entry["file"] for entry in manifest["kinds"]["qandas"]],
-            ["alpha.json"],
-        )
-
-        status, active = self.request(
-            "/api/workspace/activate",
-            "POST",
-            {"workspaceId": "beta"},
-        )
-        self.assertEqual(status, 200)
-        self.assertEqual(active["activeWorkspace"], "beta")
-        self.assertEqual(Path(active["outputDirectory"]), collection / "beta" / "output")
-
-        _, manifest = self.request("/api/content/manifest")
-        self.assertEqual(
-            [entry["file"] for entry in manifest["kinds"]["qandas"]],
-            ["beta.json"],
-        )
-
-    def test_single_workspace_selection_remains_supported(self) -> None:
-        workspace = Path(self.temporary.name) / "standalone"
-        (workspace / "output").mkdir(parents=True)
-
-        with patch("backend.server.select_workspace_folder", return_value=workspace):
-            status, selection = self.request("/api/workspace/select", "POST", {})
-
-        self.assertEqual(status, 200)
-        self.assertEqual(selection["activeWorkspace"], ".")
-        self.assertEqual(len(selection["workspaces"]), 1)
-        self.assertEqual(selection["workspaces"][0]["name"], "standalone")
-        self.assertEqual(Path(selection["outputDirectory"]), workspace / "output")
-
     def test_zip_workspace_is_extracted_listed_and_loaded(self) -> None:
         archive_bytes = io.BytesIO()
         with zipfile.ZipFile(archive_bytes, "w", zipfile.ZIP_DEFLATED) as archive:
@@ -190,6 +124,8 @@ class BackendTest(unittest.TestCase):
                     ),
                 )
 
+        status, _ = self.request("/api/workspace")
+        self.assertEqual(status, 200)
         status, uploaded = self.upload("study-materials.zip", archive_bytes.getvalue())
 
         self.assertEqual(status, 201)
@@ -211,6 +147,36 @@ class BackendTest(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertEqual(loaded["activeWorkspace"], "alpha")
+
+        status, active = self.request(
+            "/api/workspace/activate",
+            "POST",
+            {"workspaceId": "beta"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(active["activeWorkspace"], "beta")
+
+        _, manifest = self.request("/api/content/manifest")
+        self.assertEqual(
+            [entry["file"] for entry in manifest["kinds"]["qandas"]],
+            ["beta.json"],
+        )
+
+    def test_local_folder_selection_endpoint_is_not_available(self) -> None:
+        with self.assertRaises(HTTPError) as raised:
+            self.request("/api/workspace/select", "POST", {})
+
+        self.assertEqual(raised.exception.code, 404)
+
+    def test_cross_origin_workspace_request_is_rejected(self) -> None:
+        request = Request(
+            self.base + "/api/workspace/uploads",
+            headers={"Sec-Fetch-Site": "cross-site"},
+        )
+        with self.assertRaises(HTTPError) as raised:
+            urlopen(request)
+
+        self.assertEqual(raised.exception.code, 403)
 
     def test_zip_workspace_rejects_path_traversal(self) -> None:
         archive_bytes = io.BytesIO()
