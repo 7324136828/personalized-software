@@ -48,6 +48,68 @@ def kokoro_service_message() -> str:
     )
 
 
+def synthesize_wav(
+    text: str,
+    *,
+    voice: str,
+    speed: float = 1.0,
+    lang_code: str = "a",
+) -> bytes:
+    """Request one WAV utterance from the isolated Kokoro service."""
+    if voice.lower().endswith(".pt"):
+        raise RuntimeError(
+            "The Kokoro service uses named voices and cannot load a custom .pt voice file."
+        )
+    payload = json.dumps(
+        {
+            "model": "kokoro",
+            "input": text,
+            "voice": voice,
+            "speed": speed,
+            "response_format": "wav",
+            "language": lang_code,
+        }
+    ).encode("utf-8")
+    endpoint = f"{KOKORO_BASE_URL}/audio/speech"
+    request = urllib.request.Request(
+        endpoint,
+        data=payload,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=KOKORO_REQUEST_TIMEOUT) as response:
+            body = response.read()
+            render_seconds = response.headers.get("X-Render-Seconds")
+            real_time_factor = response.headers.get("X-Real-Time-Factor")
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"Kokoro service returned HTTP {error.code}: {detail}"
+        ) from error
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        raise RuntimeError(f"{kokoro_service_message()} ({error})") from error
+
+    try:
+        with wave.open(io.BytesIO(body), "rb") as source:
+            if (
+                source.getnchannels() != 1
+                or source.getsampwidth() != 2
+                or source.getframerate() != SAMPLE_RATE
+                or source.getcomptype() != "NONE"
+            ):
+                raise RuntimeError("Kokoro service returned an unsupported WAV format")
+    except (EOFError, wave.Error) as error:
+        raise RuntimeError("Kokoro service returned invalid WAV audio") from error
+    if render_seconds and real_time_factor:
+        LOG.info(
+            "Kokoro service metrics: %ss render, RTF %s",
+            render_seconds,
+            real_time_factor,
+        )
+    return body
+
+
 class RemoteKokoroPipeline:
     """Adapt the isolated OpenAI-compatible TTS service to the renderer API."""
 
@@ -60,57 +122,18 @@ class RemoteKokoroPipeline:
         LOG.info("Using isolated Kokoro service: %s", self.endpoint)
 
     def __call__(self, text: str, *, voice: str, speed: float):
-        if voice.lower().endswith(".pt"):
-            raise RuntimeError(
-                "The Kokoro service uses named voices and cannot load a custom .pt voice file."
-            )
-        payload = json.dumps(
-            {
-                "model": "kokoro",
-                "input": text,
-                "voice": voice,
-                "speed": speed,
-                "response_format": "wav",
-                "language": self.lang_code,
-            }
-        ).encode("utf-8")
-        request = urllib.request.Request(
-            self.endpoint,
-            data=payload,
-            method="POST",
-            headers={"Content-Type": "application/json"},
+        body = synthesize_wav(
+            text,
+            voice=voice,
+            speed=speed,
+            lang_code=self.lang_code,
         )
-        try:
-            with urllib.request.urlopen(request, timeout=KOKORO_REQUEST_TIMEOUT) as response:
-                body = response.read()
-                render_seconds = response.headers.get("X-Render-Seconds")
-                real_time_factor = response.headers.get("X-Real-Time-Factor")
-        except urllib.error.HTTPError as error:
-            detail = error.read().decode("utf-8", errors="replace")
-            raise RuntimeError(
-                f"Kokoro service returned HTTP {error.code}: {detail}"
-            ) from error
-        except (urllib.error.URLError, TimeoutError, OSError) as error:
-            raise RuntimeError(f"{kokoro_service_message()} ({error})") from error
 
         with wave.open(io.BytesIO(body), "rb") as source:
-            if (
-                source.getnchannels() != 1
-                or source.getsampwidth() != 2
-                or source.getframerate() != SAMPLE_RATE
-                or source.getcomptype() != "NONE"
-            ):
-                raise RuntimeError("Kokoro service returned an unsupported WAV format")
             pcm = source.readframes(source.getnframes())
         import numpy as np
 
         audio = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32767.0
-        if render_seconds and real_time_factor:
-            LOG.info(
-                "Kokoro service metrics: %ss render, RTF %s",
-                render_seconds,
-                real_time_factor,
-            )
         yield text, "", audio
 
 

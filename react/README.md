@@ -13,8 +13,17 @@ run.bat dev
 ```
 
 This starts the backend and Vite together, then opens
-http://localhost:5174/#/qanda. Newly generated content appears after clicking
+http://localhost:5174/#/qanda. Click **Choose workspace** in the website header
+and select either one workspace or a parent folder containing several workspace
+subfolders. Each immediate subfolder with an `output` directory appears in the
+dropdown beside the button. Newly generated content appears after clicking
 **Reload content**.
+
+Use **Upload ZIP** to extract a workspace collection into the operating system's
+temporary `personalized-software/workspaces` directory. Uploaded archives may
+be up to 512 MB compressed, 2 GB extracted, and 20,000 files; unsafe paths,
+symbolic links, and encrypted ZIPs are rejected. **Load existing workspace**
+lists valid uploads that are still present in that temporary directory.
 
 For a production build and local server, run `run.bat`. Use `run.bat build` to
 build without serving and `run.bat help` for all options.
@@ -36,12 +45,14 @@ From this directory, the equivalent npm scripts are:
 
 ## Data flow
 
-`../python/backend/server.py` builds a manifest from `../new_output` on every
-request, merging every subject folder (`new_output/<subject>/<kind>/`) into one
-list per kind. It serves JSON and related files (`.md`, `.html`, `.svg`,
+After an output is selected in the website, `../python/backend/server.py`
+builds a manifest from that `output` folder on every request, merging every
+subject folder (`output/<subject>/<kind>/`) into one list per kind. It serves
+JSON and related files (`.md`, `.html`, `.svg`,
 `.csv`, `.mmd`, `.txt`, and `.wireframe.txt`) under `/api/content`. The browser
 always sees current generated output without staging it in `react/public/data`.
-The older flat `../output/<kind>/` layout is still read when present.
+Direct backend and npm commands still default to `../new_output`. The older flat
+`output/<kind>/` layout is also read when present.
 
 A malformed document is reported in the sidebar rather than taking the whole
 view down. In development, Vite proxies `/api` to the backend. In production,
@@ -92,6 +103,7 @@ response, static, or port location.
 ## Keyboard
 
 - **Quiz** — click to answer, submit, then advance
-- **Flashcards** — space flips then advances, ← → navigate, `j` known, `f` review
+- **Flashcards** — space flips then advances, ← → navigate, `j` known, `f` review,
+  and **Play** generates cached Kokoro narration for both sides
 - **Slides** — ← → or space to move, F5 present, Esc exit
 - **Mind maps** — click a node to collapse/expand, drag to pan, Ctrl+wheel zoom

@@ -1,8 +1,9 @@
 """Serve generated content and temporary free-text Q&A sessions.
 
 The server intentionally uses only Python's standard library. Generated files
-are read directly from ``new_output/`` on every request, so the React
-application does not need a separate data-sync step.
+are read directly from the active content directory on every request, so the
+React application does not need a separate data-sync step. The local website
+can switch that directory by asking the user to select a workspace.
 
 Content is organised per subject: ``new_output/<subject>/<kind>/<file>`` (for
 example ``new_output/classical_chinese/quizzes/quiz_heart_sutra.json``). The
@@ -15,24 +16,29 @@ from __future__ import annotations
 
 import argparse
 from collections import deque
+import hashlib
+import ipaddress
 import json
 import logging
 import mimetypes
 import os
 import re
+import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
 import uuid
 import webbrowser
+import zipfile
 from datetime import datetime, timezone
 from functools import partial
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 from urllib.parse import parse_qs, unquote, urlsplit
 
 try:  # imported as ``backend.server`` (tests, package context)
@@ -46,10 +52,24 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "new_output"
 DEFAULT_STATIC_DIR = PROJECT_ROOT / "react" / "dist"
 DEFAULT_RESPONSE_DIR = Path(tempfile.gettempdir()) / "personalized-software" / "qa-sessions"
+DEFAULT_WORKSPACE_ARCHIVE_DIR = (
+    Path(tempfile.gettempdir()) / "personalized-software" / "workspaces"
+)
+DEFAULT_FLASHCARD_AUDIO_DIR = (
+    Path(tempfile.gettempdir()) / "personalized-software" / "flashcard-audio"
+)
 PODCAST_CHECKPOINT_DIR = PROJECT_ROOT / ".checkpoints" / "podcasts"
 PODCAST_DEVICE = os.environ.get("PODCAST_DEVICE", "auto")
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
+MAX_WORKSPACE_ARCHIVE_BYTES = 512 * 1024 * 1024
+MAX_WORKSPACE_EXTRACTED_BYTES = 2 * 1024 * 1024 * 1024
+MAX_WORKSPACE_ARCHIVE_FILES = 20_000
+MAX_FLASHCARD_AUDIO_CARDS = 1_000
+MAX_FLASHCARD_AUDIO_CHARACTERS = 1_000_000
 PODCAST_LOG_CAPACITY = 2_000
+FLASHCARD_FRONT_VOICE = os.environ.get("FLASHCARD_FRONT_VOICE", "af_heart")
+FLASHCARD_BACK_VOICE = os.environ.get("FLASHCARD_BACK_VOICE", "af_heart")
+FLASHCARD_AUDIO_LOCK = threading.Lock()
 
 KINDS: dict[str, tuple[str, ...]] = {
     "quizzes": (),
@@ -65,6 +85,374 @@ KINDS: dict[str, tuple[str, ...]] = {
 
 SESSION_ID = re.compile(r"^[0-9a-f]{32}$")
 WRITE_LOCK = threading.Lock()
+
+
+def workspace_directories(collection: Path) -> list[Path]:
+    """Find a workspace at this path and in each immediate child folder."""
+    candidates: list[Path] = []
+    if (collection / "output").is_dir():
+        candidates.append(collection)
+    try:
+        children = sorted(collection.iterdir(), key=lambda path: path.name.casefold())
+    except OSError as error:
+        raise ValueError(f"The selected folder could not be read: {collection}") from error
+    candidates.extend(
+        child for child in children if child.is_dir() and (child / "output").is_dir()
+    )
+    return candidates
+
+
+class ContentState:
+    """Thread-safe content location shared by every request handler."""
+
+    def __init__(self, output_dir: Path) -> None:
+        self._lock = threading.RLock()
+        resolved = output_dir.resolve()
+        workspace = resolved.parent if resolved.name.casefold() == "output" else None
+        self._collection_dir: Path | None = None
+        self._workspaces = {
+            "initial": {
+                "id": "initial",
+                "name": workspace.name if workspace is not None else resolved.name,
+                "workspaceDirectory": str(workspace) if workspace is not None else None,
+                "outputDirectory": str(resolved),
+            }
+        }
+        self._active_workspace = "initial"
+
+    @property
+    def output_dir(self) -> Path:
+        with self._lock:
+            return Path(self._workspaces[self._active_workspace]["outputDirectory"])
+
+    def select_collection(self, collection: Path) -> Path:
+        collection = collection.expanduser().resolve()
+        candidates = workspace_directories(collection)
+        if not candidates:
+            raise ValueError(
+                "The selected folder must contain an output folder, or have immediate "
+                "subfolders that contain output folders"
+            )
+
+        workspaces: dict[str, dict[str, str | None]] = {}
+        for workspace in candidates:
+            identifier = "." if workspace == collection else workspace.name
+            workspaces[identifier] = {
+                "id": identifier,
+                "name": workspace.name,
+                "workspaceDirectory": str(workspace),
+                "outputDirectory": str(workspace / "output"),
+            }
+        with self._lock:
+            self._collection_dir = collection
+            self._workspaces = workspaces
+            self._active_workspace = next(iter(workspaces))
+            return Path(workspaces[self._active_workspace]["outputDirectory"])
+
+    def activate_workspace(self, identifier: str) -> Path:
+        with self._lock:
+            workspace = self._workspaces.get(identifier)
+            if workspace is None:
+                raise ValueError("The requested workspace is not in the selected folder")
+            output_dir = Path(workspace["outputDirectory"])
+            if not output_dir.is_dir():
+                raise ValueError(f"The workspace output folder no longer exists: {output_dir}")
+            self._active_workspace = identifier
+            return output_dir
+
+    def initial_selection_directory(self) -> Path:
+        with self._lock:
+            if self._collection_dir is not None:
+                return self._collection_dir
+            active = self._workspaces[self._active_workspace]
+            workspace = active["workspaceDirectory"]
+            return Path(workspace) if workspace is not None else PROJECT_ROOT
+
+    def status(self) -> dict[str, Any]:
+        with self._lock:
+            active = self._workspaces[self._active_workspace]
+            output_dir = Path(active["outputDirectory"])
+            return {
+                "collectionDirectory": (
+                    str(self._collection_dir) if self._collection_dir is not None else None
+                ),
+                "activeWorkspace": self._active_workspace,
+                "workspaces": list(self._workspaces.values()),
+                "outputDirectory": str(output_dir),
+                "workspace": active["workspaceDirectory"],
+                "exists": output_dir.is_dir(),
+            }
+
+
+def select_workspace_folder(initial_dir: Path) -> Path | None:
+    """Open the OS directory chooser after a request from the local web app."""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except ImportError as error:
+        raise RuntimeError("The system folder chooser is unavailable") from error
+
+    root = None
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        selected = filedialog.askdirectory(
+            parent=root,
+            title="Select a folder containing workspaces with output folders",
+            initialdir=str(initial_dir),
+            mustexist=True,
+        )
+    except tk.TclError as error:
+        raise RuntimeError("The system folder chooser could not be opened") from error
+    finally:
+        if root is not None:
+            root.destroy()
+    return Path(selected).expanduser().resolve() if selected else None
+
+
+def _archive_member_path(extract_root: Path, member_name: str) -> Path:
+    normalized = member_name.replace("\\", "/")
+    if normalized.startswith("/") or re.match(r"^[A-Za-z]:", normalized):
+        raise ValueError(f"ZIP entry uses an absolute path: {member_name}")
+    parts = [part for part in normalized.split("/") if part not in {"", "."}]
+    if not parts or any(part == ".." or ":" in part for part in parts):
+        raise ValueError(f"ZIP entry has an unsafe path: {member_name}")
+    destination = (extract_root / Path(*parts)).resolve()
+    try:
+        destination.relative_to(extract_root.resolve())
+    except ValueError as error:
+        raise ValueError(f"ZIP entry escapes the extraction folder: {member_name}") from error
+    return destination
+
+
+def _find_uploaded_collection(extract_root: Path) -> Path:
+    """Find outputs at the archive root or beneath a single wrapper folder."""
+    candidate = extract_root
+    for _ in range(10):
+        if workspace_directories(candidate):
+            return candidate
+        try:
+            children = [
+                child
+                for child in candidate.iterdir()
+                if child.is_dir() and child.name != "__MACOSX"
+            ]
+        except OSError as error:
+            raise ValueError("The extracted workspace could not be read") from error
+        if len(children) != 1:
+            break
+        candidate = children[0]
+    raise ValueError(
+        "The ZIP must contain a workspace with output, or immediate subfolders "
+        "that contain output folders"
+    )
+
+
+def import_workspace_archive(
+    source: BinaryIO,
+    content_length: int,
+    filename: str,
+    archive_dir: Path,
+) -> tuple[dict[str, Any], Path]:
+    """Persist and safely extract an uploaded workspace ZIP in the temp area."""
+    original_name = Path(filename).name
+    if not original_name.lower().endswith(".zip"):
+        raise ValueError("Only .zip workspace archives can be uploaded")
+    if content_length <= 0:
+        raise ValueError("The uploaded ZIP is empty")
+    if content_length > MAX_WORKSPACE_ARCHIVE_BYTES:
+        raise ValueError("The uploaded ZIP exceeds the 512 MB limit")
+
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=".upload-", dir=archive_dir))
+    try:
+        archive_path = staging / "upload.zip"
+        remaining = content_length
+        with archive_path.open("wb") as destination:
+            while remaining:
+                chunk = source.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    raise ValueError("The ZIP upload ended before all bytes were received")
+                destination.write(chunk)
+                remaining -= len(chunk)
+
+        extract_root = staging / "files"
+        extract_root.mkdir()
+        try:
+            with zipfile.ZipFile(archive_path) as archive:
+                members = archive.infolist()
+                file_members = [member for member in members if not member.is_dir()]
+                if len(file_members) > MAX_WORKSPACE_ARCHIVE_FILES:
+                    raise ValueError("The ZIP contains too many files")
+                if sum(member.file_size for member in file_members) > MAX_WORKSPACE_EXTRACTED_BYTES:
+                    raise ValueError("The ZIP expands beyond the 2 GB limit")
+                for member in members:
+                    mode = member.external_attr >> 16
+                    if stat.S_ISLNK(mode):
+                        raise ValueError(f"ZIP symbolic links are not supported: {member.filename}")
+                    if member.flag_bits & 0x1:
+                        raise ValueError("Encrypted ZIP files are not supported")
+                    target = _archive_member_path(extract_root, member.filename)
+                    if member.is_dir():
+                        target.mkdir(parents=True, exist_ok=True)
+                        continue
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with archive.open(member) as source_file, target.open("wb") as target_file:
+                        shutil.copyfileobj(source_file, target_file, length=1024 * 1024)
+        except (zipfile.BadZipFile, zipfile.LargeZipFile) as error:
+            raise ValueError("The uploaded file is not a valid ZIP archive") from error
+
+        collection = _find_uploaded_collection(extract_root)
+        identifier = uuid.uuid4().hex
+        metadata = {
+            "id": identifier,
+            "name": Path(original_name).stem or "workspace",
+            "originalFilename": original_name,
+            "uploadedAt": utc_now(),
+            "collectionRelative": collection.relative_to(staging).as_posix(),
+            "workspaceCount": len(workspace_directories(collection)),
+        }
+        (staging / "metadata.json").write_text(
+            json.dumps(metadata, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        archive_path.unlink()
+        final_dir = archive_dir / identifier
+        staging.replace(final_dir)
+        return metadata, final_dir / metadata["collectionRelative"]
+    except (OSError, RuntimeError) as error:
+        raise ValueError(f"The workspace ZIP could not be extracted: {error}") from error
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+
+
+def list_workspace_archives(archive_dir: Path) -> list[dict[str, Any]]:
+    """List valid, previously extracted workspace ZIPs."""
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    uploads: list[dict[str, Any]] = []
+    for metadata_path in archive_dir.glob("*/metadata.json"):
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            identifier = metadata["id"]
+            if not isinstance(identifier, str) or not SESSION_ID.fullmatch(identifier):
+                continue
+            collection = safe_child(metadata_path.parent, metadata["collectionRelative"])
+            workspaces = workspace_directories(collection)
+            if not workspaces:
+                continue
+            uploads.append(
+                {
+                    "id": identifier,
+                    "name": str(metadata["name"]),
+                    "originalFilename": str(metadata["originalFilename"]),
+                    "uploadedAt": str(metadata["uploadedAt"]),
+                    "workspaceCount": len(workspaces),
+                }
+            )
+        except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+    uploads.sort(key=lambda item: item["uploadedAt"], reverse=True)
+    return uploads
+
+
+def workspace_archive_collection(archive_dir: Path, identifier: str) -> Path:
+    """Resolve a saved upload ID to its validated extracted collection."""
+    if not SESSION_ID.fullmatch(identifier):
+        raise ValueError("Invalid uploaded workspace ID")
+    upload_dir = safe_child(archive_dir, identifier)
+    try:
+        metadata = json.loads((upload_dir / "metadata.json").read_text(encoding="utf-8"))
+        collection = safe_child(upload_dir, metadata["collectionRelative"])
+    except (KeyError, OSError, TypeError, json.JSONDecodeError) as error:
+        raise ValueError("The uploaded workspace could not be loaded") from error
+    if not workspace_directories(collection):
+        raise ValueError("The uploaded workspace no longer contains any output folders")
+    return collection
+
+
+def _flashcard_audio_path(cache_dir: Path, text: str, voice: str) -> Path:
+    cache_key = hashlib.sha256(
+        json.dumps(
+            {
+                "text": text,
+                "voice": voice,
+                "speed": 1.0,
+                "language": "a",
+                "kokoro": podcast_render.KOKORO_SERVICE_VERSION,
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    return cache_dir / f"{cache_key}.wav"
+
+
+def generate_flashcard_audio(payload: Any, cache_dir: Path) -> dict[str, Any]:
+    """Synthesize and cache both sides of every supplied flashcard."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("cards"), list):
+        raise ValueError("cards must be an array")
+    raw_cards = payload["cards"]
+    if not raw_cards:
+        raise ValueError("cards must not be empty")
+    if len(raw_cards) > MAX_FLASHCARD_AUDIO_CARDS:
+        raise ValueError(f"At most {MAX_FLASHCARD_AUDIO_CARDS} flashcards can be narrated")
+
+    cards: list[tuple[str, str]] = []
+    total_characters = 0
+    for index, card in enumerate(raw_cards):
+        if not isinstance(card, dict):
+            raise ValueError(f"cards[{index}] must be an object")
+        front = card.get("front")
+        back = card.get("back")
+        if not isinstance(front, str) or not front.strip():
+            raise ValueError(f"cards[{index}].front must be a non-empty string")
+        if not isinstance(back, str) or not back.strip():
+            raise ValueError(f"cards[{index}].back must be a non-empty string")
+        front = front.strip()
+        back = back.strip()
+        total_characters += len(front) + len(back)
+        cards.append((front, back))
+    if total_characters > MAX_FLASHCARD_AUDIO_CHARACTERS:
+        raise ValueError("The flashcard text exceeds the narration limit")
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    result: list[dict[str, str]] = []
+    with FLASHCARD_AUDIO_LOCK:
+        for front, back in cards:
+            urls: dict[str, str] = {}
+            for side, text, voice in (
+                ("front", front, FLASHCARD_FRONT_VOICE),
+                ("back", back, FLASHCARD_BACK_VOICE),
+            ):
+                audio_path = _flashcard_audio_path(cache_dir, text, voice)
+                if not audio_path.is_file():
+                    wav = podcast_render.synthesize_wav(text, voice=voice)
+                    temporary = audio_path.with_suffix(f".{uuid.uuid4().hex}.tmp")
+                    try:
+                        temporary.write_bytes(wav)
+                        temporary.replace(audio_path)
+                    finally:
+                        temporary.unlink(missing_ok=True)
+                urls[side] = f"/api/flashcards/audio/{audio_path.name}"
+            result.append(urls)
+    return {
+        "cards": result,
+        "frontVoice": FLASHCARD_FRONT_VOICE,
+        "backVoice": FLASHCARD_BACK_VOICE,
+    }
+
+
+def is_loopback_client(host: str) -> bool:
+    """Return whether a request originated on the computer running the app."""
+    try:
+        address = ipaddress.ip_address(host.split("%", 1)[0])
+    except ValueError:
+        return False
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    return address.is_loopback
 
 
 class PodcastMemoryLogHandler(logging.Handler):
@@ -423,15 +811,30 @@ class LearningRequestHandler(SimpleHTTPRequestHandler):
     def __init__(
         self,
         *args: Any,
-        output_dir: Path,
+        content_state: ContentState,
         response_dir: Path,
         static_dir: Path,
+        workspace_archive_dir: Path,
+        flashcard_audio_dir: Path,
         **kwargs: Any,
     ) -> None:
-        self.output_dir = output_dir
+        self.content_state = content_state
         self.response_dir = response_dir
         self.static_dir = static_dir
+        self.workspace_archive_dir = workspace_archive_dir
+        self.flashcard_audio_dir = flashcard_audio_dir
         super().__init__(*args, directory=str(static_dir), **kwargs)
+
+    @property
+    def output_dir(self) -> Path:
+        return self.content_state.output_dir
+
+    def _workspace_selection_allowed(self) -> bool:
+        fetch_site = self.headers.get("Sec-Fetch-Site")
+        return is_loopback_client(self.client_address[0]) and fetch_site in {
+            None,
+            "same-origin",
+        }
 
     def end_headers(self) -> None:
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -482,8 +885,32 @@ class LearningRequestHandler(SimpleHTTPRequestHandler):
             if path == "/api/health":
                 self._json(HTTPStatus.OK, {"status": "ok"})
                 return
+            if path == "/api/workspace":
+                if not self._workspace_selection_allowed():
+                    self._error(
+                        HTTPStatus.FORBIDDEN,
+                        "Workspace selection is only available on the computer running the app",
+                    )
+                    return
+                self._json(HTTPStatus.OK, self.content_state.status())
+                return
+            if path == "/api/workspace/uploads":
+                if not self._workspace_selection_allowed():
+                    self._error(
+                        HTTPStatus.FORBIDDEN,
+                        "Uploaded workspaces are only available on the computer running the app",
+                    )
+                    return
+                self._json(
+                    HTTPStatus.OK,
+                    {"uploads": list_workspace_archives(self.workspace_archive_dir)},
+                )
+                return
             if path == "/api/content/manifest":
                 self._json(HTTPStatus.OK, build_manifest(self.output_dir))
+                return
+            if path.startswith("/api/flashcards/audio/"):
+                self._serve_flashcard_audio(path.removeprefix("/api/flashcards/audio/"))
                 return
             if path.startswith("/api/content/"):
                 self._serve_content(path.removeprefix("/api/content/"))
@@ -520,6 +947,117 @@ class LearningRequestHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
         path = unquote(urlsplit(self.path).path)
+        if path == "/api/flashcards/audio":
+            try:
+                generated = generate_flashcard_audio(
+                    self._read_json(),
+                    self.flashcard_audio_dir,
+                )
+                self._json(HTTPStatus.OK, generated)
+            except ValueError as error:
+                self._error(HTTPStatus.BAD_REQUEST, str(error))
+            except RuntimeError as error:
+                self._error(HTTPStatus.SERVICE_UNAVAILABLE, str(error))
+            return
+        if path == "/api/workspace/upload":
+            if not self._workspace_selection_allowed():
+                self._drain_body()
+                self._error(
+                    HTTPStatus.FORBIDDEN,
+                    "Workspace uploads are only available on the computer running the app",
+                )
+                return
+            try:
+                raw_length = self.headers.get("Content-Length")
+                if raw_length is None:
+                    raise ValueError("Content-Length is required")
+                try:
+                    content_length = int(raw_length)
+                except ValueError as error:
+                    raise ValueError("Invalid Content-Length") from error
+                filename = unquote(self.headers.get("X-File-Name") or "workspace.zip")
+                upload, collection = import_workspace_archive(
+                    self.rfile,
+                    content_length,
+                    filename,
+                    self.workspace_archive_dir,
+                )
+                self.content_state.select_collection(collection)
+                self._json(
+                    HTTPStatus.CREATED,
+                    {**self.content_state.status(), "upload": upload},
+                )
+            except ValueError as error:
+                self._error(HTTPStatus.BAD_REQUEST, str(error))
+            return
+        if path == "/api/workspace/select":
+            self._drain_body()
+            if not self._workspace_selection_allowed():
+                self._error(
+                    HTTPStatus.FORBIDDEN,
+                    "Workspace selection is only available on the computer running the app",
+                )
+                return
+            try:
+                collection = select_workspace_folder(
+                    self.content_state.initial_selection_directory()
+                )
+                if collection is None:
+                    self._json(
+                        HTTPStatus.OK,
+                        {**self.content_state.status(), "cancelled": True},
+                    )
+                    return
+                self.content_state.select_collection(collection)
+                self._json(
+                    HTTPStatus.OK,
+                    {**self.content_state.status(), "cancelled": False},
+                )
+            except ValueError as error:
+                self._error(HTTPStatus.BAD_REQUEST, str(error))
+            except RuntimeError as error:
+                self._error(HTTPStatus.SERVICE_UNAVAILABLE, str(error))
+            return
+        if path == "/api/workspace/activate":
+            if not self._workspace_selection_allowed():
+                self._drain_body()
+                self._error(
+                    HTTPStatus.FORBIDDEN,
+                    "Workspace selection is only available on the computer running the app",
+                )
+                return
+            try:
+                payload = self._read_json()
+                identifier = payload.get("workspaceId") if isinstance(payload, dict) else None
+                if not isinstance(identifier, str) or not identifier:
+                    raise ValueError("workspaceId must be a non-empty string")
+                self.content_state.activate_workspace(identifier)
+                self._json(HTTPStatus.OK, self.content_state.status())
+            except ValueError as error:
+                self._error(HTTPStatus.BAD_REQUEST, str(error))
+            return
+        if path == "/api/workspace/load":
+            if not self._workspace_selection_allowed():
+                self._drain_body()
+                self._error(
+                    HTTPStatus.FORBIDDEN,
+                    "Uploaded workspaces are only available on the computer running the app",
+                )
+                return
+            try:
+                payload = self._read_json()
+                identifier = payload.get("uploadId") if isinstance(payload, dict) else None
+                if not isinstance(identifier, str) or not identifier:
+                    raise ValueError("uploadId must be a non-empty string")
+                collection = workspace_archive_collection(
+                    self.workspace_archive_dir,
+                    identifier,
+                )
+                self.content_state.select_collection(collection)
+                self._json(HTTPStatus.OK, self.content_state.status())
+            except ValueError as error:
+                self._error(HTTPStatus.BAD_REQUEST, str(error))
+            return
         if path == "/api/generate_podcast":
             # The "Refresh Podcasts" buttons (React and desktop) call this to
             # (re)synthesise audio for every podcast script JSON in the content
@@ -586,6 +1124,20 @@ class LearningRequestHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _serve_flashcard_audio(self, file_name: str) -> None:
+        if not re.fullmatch(r"[0-9a-f]{64}\.wav", file_name):
+            raise FileNotFoundError(file_name)
+        path = safe_child(self.flashcard_audio_dir, file_name)
+        if not path.is_file():
+            raise FileNotFoundError(file_name)
+        body = path.read_bytes()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "audio/wav")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        self.end_headers()
+        self.wfile.write(body)
+
     def _serve_static(self, path: str) -> None:
         if not self.static_dir.is_dir():
             self._error(
@@ -605,12 +1157,17 @@ def create_server(
     output_dir: Path,
     response_dir: Path,
     static_dir: Path,
+    workspace_archive_dir: Path = DEFAULT_WORKSPACE_ARCHIVE_DIR,
+    flashcard_audio_dir: Path = DEFAULT_FLASHCARD_AUDIO_DIR,
 ) -> ThreadingHTTPServer:
+    content_state = ContentState(output_dir)
     handler = partial(
         LearningRequestHandler,
-        output_dir=output_dir.resolve(),
+        content_state=content_state,
         response_dir=response_dir.resolve(),
         static_dir=static_dir.resolve(),
+        workspace_archive_dir=workspace_archive_dir.resolve(),
+        flashcard_audio_dir=flashcard_audio_dir.resolve(),
     )
     return ThreadingHTTPServer((host, port), handler)
 
