@@ -37,7 +37,6 @@ interface WorkspaceStatus {
   outputDirectory: string;
   workspace: string | null;
   exists: boolean;
-  cancelled?: boolean;
 }
 
 interface UploadedWorkspace {
@@ -64,24 +63,6 @@ export function App() {
       })
       .catch((error: Error) => setWorkspaceError(error.message));
   }, []);
-
-  async function chooseWorkspace() {
-    setWorkspaceAction("choose");
-    setWorkspaceError("");
-    try {
-      const response = await fetch(`${import.meta.env.BASE_URL}api/workspace/select`, {
-        method: "POST",
-      });
-      const body = (await response.json()) as WorkspaceStatus & { error?: string };
-      if (!response.ok) throw new Error(body.error ?? `Folder selection failed (${response.status})`);
-      setWorkspace(body);
-      if (!body.cancelled) window.location.reload();
-    } catch (error) {
-      setWorkspaceError((error as Error).message);
-    } finally {
-      setWorkspaceAction(null);
-    }
-  }
 
   async function activateWorkspace(workspaceId: string) {
     if (!workspace || workspaceId === workspace.activeWorkspace) return;
@@ -208,7 +189,7 @@ export function App() {
           <select
             className="workspace-select"
             aria-label="Active output"
-            title={workspace?.outputDirectory ?? "Choose a folder to find its outputs"}
+            title={workspace?.outputDirectory ?? "Upload or load a workspace ZIP"}
             value={workspace?.activeWorkspace ?? ""}
             disabled={workspaceBusy || !workspace || workspace.workspaces.length === 0}
             onChange={(event) => void activateWorkspace(event.target.value)}
@@ -220,9 +201,6 @@ export function App() {
               </option>
             ))}
           </select>
-          <button type="button" onClick={() => void chooseWorkspace()} disabled={workspaceBusy}>
-            {workspaceAction === "choose" ? "Choosing..." : "Choose workspace"}
-          </button>
           <button
             type="button"
             onClick={() => void toggleUploadedWorkspaces()}

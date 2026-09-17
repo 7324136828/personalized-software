@@ -170,22 +170,11 @@ def stop_process(process: subprocess.Popen[str] | None, label: str) -> None:
         process.wait(timeout=5)
 
 
-def resolve_workspace_path(folder_path: Path | None) -> Path | None:
-    """Resolve an optional initial workspace supplied for non-interactive use."""
-    return folder_path.expanduser().resolve() if folder_path is not None else None
-
-
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build or run the learning-content application")
     parser.add_argument("command", nargs="?", choices=["serve", "dev", "build"], default="serve")
     parser.add_argument("--port", type=int, help="frontend port; defaults to 4173 or 5174 in dev")
     parser.add_argument("--no-open", action="store_true", help="do not open a browser")
-    parser.add_argument(
-        "--folder-path",
-        type=Path,
-        metavar="PATH",
-        help="initial workspace folder whose output directory should be served",
-    )
     parser.add_argument(
         "--host",
         help="interface to bind (use 0.0.0.0 to reach the app from other devices)",
@@ -234,9 +223,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     host = "0.0.0.0" if args.lan and not args.host else args.host
     host_args = ["--host", host] if host else []
-    folder_path = resolve_workspace_path(args.folder_path)
-    folder_args = ["--folder-path", folder_path] if folder_path else []
-
     executable("node")
     npm = executable("npm")
     if not (REACT_DIR / "package.json").is_file():
@@ -267,7 +253,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             "--frontend-port",
             str(frontend_port),
             *host_args,
-            *folder_args,
         ]
         if not args.no_open:
             command.append("--open")
@@ -292,7 +277,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--port",
         str(frontend_port),
         *host_args,
-        *folder_args,
     ]
     if not args.no_open:
         command.append("--open")

@@ -3,7 +3,7 @@
 The server intentionally uses only Python's standard library. Generated files
 are read directly from the active content directory on every request, so the
 React application does not need a separate data-sync step. The local website
-can switch that directory by asking the user to select a workspace.
+can switch that directory by uploading or reopening a workspace ZIP.
 
 Content is organised per subject: ``new_output/<subject>/<kind>/<file>`` (for
 example ``new_output/classical_chinese/quizzes/quiz_heart_sutra.json``). The
@@ -17,7 +17,6 @@ from __future__ import annotations
 import argparse
 from collections import deque
 import hashlib
-import ipaddress
 import json
 import logging
 import mimetypes
@@ -160,14 +159,6 @@ class ContentState:
             self._active_workspace = identifier
             return output_dir
 
-    def initial_selection_directory(self) -> Path:
-        with self._lock:
-            if self._collection_dir is not None:
-                return self._collection_dir
-            active = self._workspaces[self._active_workspace]
-            workspace = active["workspaceDirectory"]
-            return Path(workspace) if workspace is not None else PROJECT_ROOT
-
     def status(self) -> dict[str, Any]:
         with self._lock:
             active = self._workspaces[self._active_workspace]
@@ -182,33 +173,6 @@ class ContentState:
                 "workspace": active["workspaceDirectory"],
                 "exists": output_dir.is_dir(),
             }
-
-
-def select_workspace_folder(initial_dir: Path) -> Path | None:
-    """Open the OS directory chooser after a request from the local web app."""
-    try:
-        import tkinter as tk
-        from tkinter import filedialog
-    except ImportError as error:
-        raise RuntimeError("The system folder chooser is unavailable") from error
-
-    root = None
-    try:
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes("-topmost", True)
-        selected = filedialog.askdirectory(
-            parent=root,
-            title="Select a folder containing workspaces with output folders",
-            initialdir=str(initial_dir),
-            mustexist=True,
-        )
-    except tk.TclError as error:
-        raise RuntimeError("The system folder chooser could not be opened") from error
-    finally:
-        if root is not None:
-            root.destroy()
-    return Path(selected).expanduser().resolve() if selected else None
 
 
 def _archive_member_path(extract_root: Path, member_name: str) -> Path:
@@ -442,17 +406,6 @@ def generate_flashcard_audio(payload: Any, cache_dir: Path) -> dict[str, Any]:
         "frontVoice": FLASHCARD_FRONT_VOICE,
         "backVoice": FLASHCARD_BACK_VOICE,
     }
-
-
-def is_loopback_client(host: str) -> bool:
-    """Return whether a request originated on the computer running the app."""
-    try:
-        address = ipaddress.ip_address(host.split("%", 1)[0])
-    except ValueError:
-        return False
-    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
-        address = address.ipv4_mapped
-    return address.is_loopback
 
 
 class PodcastMemoryLogHandler(logging.Handler):
@@ -829,12 +782,9 @@ class LearningRequestHandler(SimpleHTTPRequestHandler):
     def output_dir(self) -> Path:
         return self.content_state.output_dir
 
-    def _workspace_selection_allowed(self) -> bool:
+    def _workspace_web_access_allowed(self) -> bool:
         fetch_site = self.headers.get("Sec-Fetch-Site")
-        return is_loopback_client(self.client_address[0]) and fetch_site in {
-            None,
-            "same-origin",
-        }
+        return fetch_site in {None, "same-origin"}
 
     def end_headers(self) -> None:
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -886,19 +836,19 @@ class LearningRequestHandler(SimpleHTTPRequestHandler):
                 self._json(HTTPStatus.OK, {"status": "ok"})
                 return
             if path == "/api/workspace":
-                if not self._workspace_selection_allowed():
+                if not self._workspace_web_access_allowed():
                     self._error(
                         HTTPStatus.FORBIDDEN,
-                        "Workspace selection is only available on the computer running the app",
+                        "Cross-origin workspace access is not allowed",
                     )
                     return
                 self._json(HTTPStatus.OK, self.content_state.status())
                 return
             if path == "/api/workspace/uploads":
-                if not self._workspace_selection_allowed():
+                if not self._workspace_web_access_allowed():
                     self._error(
                         HTTPStatus.FORBIDDEN,
-                        "Uploaded workspaces are only available on the computer running the app",
+                        "Cross-origin workspace access is not allowed",
                     )
                     return
                 self._json(
@@ -960,11 +910,11 @@ class LearningRequestHandler(SimpleHTTPRequestHandler):
                 self._error(HTTPStatus.SERVICE_UNAVAILABLE, str(error))
             return
         if path == "/api/workspace/upload":
-            if not self._workspace_selection_allowed():
+            if not self._workspace_web_access_allowed():
                 self._drain_body()
                 self._error(
                     HTTPStatus.FORBIDDEN,
-                    "Workspace uploads are only available on the computer running the app",
+                    "Cross-origin workspace access is not allowed",
                 )
                 return
             try:
@@ -990,40 +940,12 @@ class LearningRequestHandler(SimpleHTTPRequestHandler):
             except ValueError as error:
                 self._error(HTTPStatus.BAD_REQUEST, str(error))
             return
-        if path == "/api/workspace/select":
-            self._drain_body()
-            if not self._workspace_selection_allowed():
-                self._error(
-                    HTTPStatus.FORBIDDEN,
-                    "Workspace selection is only available on the computer running the app",
-                )
-                return
-            try:
-                collection = select_workspace_folder(
-                    self.content_state.initial_selection_directory()
-                )
-                if collection is None:
-                    self._json(
-                        HTTPStatus.OK,
-                        {**self.content_state.status(), "cancelled": True},
-                    )
-                    return
-                self.content_state.select_collection(collection)
-                self._json(
-                    HTTPStatus.OK,
-                    {**self.content_state.status(), "cancelled": False},
-                )
-            except ValueError as error:
-                self._error(HTTPStatus.BAD_REQUEST, str(error))
-            except RuntimeError as error:
-                self._error(HTTPStatus.SERVICE_UNAVAILABLE, str(error))
-            return
         if path == "/api/workspace/activate":
-            if not self._workspace_selection_allowed():
+            if not self._workspace_web_access_allowed():
                 self._drain_body()
                 self._error(
                     HTTPStatus.FORBIDDEN,
-                    "Workspace selection is only available on the computer running the app",
+                    "Cross-origin workspace access is not allowed",
                 )
                 return
             try:
@@ -1037,11 +959,11 @@ class LearningRequestHandler(SimpleHTTPRequestHandler):
                 self._error(HTTPStatus.BAD_REQUEST, str(error))
             return
         if path == "/api/workspace/load":
-            if not self._workspace_selection_allowed():
+            if not self._workspace_web_access_allowed():
                 self._drain_body()
                 self._error(
                     HTTPStatus.FORBIDDEN,
-                    "Uploaded workspaces are only available on the computer running the app",
+                    "Cross-origin workspace access is not allowed",
                 )
                 return
             try:
@@ -1269,18 +1191,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Shortcut for --host 0.0.0.0: serve to other devices on this network",
     )
     parser.add_argument("--port", type=int, default=8765, help="Backend/production web port")
-    content_group = parser.add_mutually_exclusive_group()
-    content_group.add_argument(
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=DEFAULT_OUTPUT_DIR,
         help="Content root; scanned as <output-dir>/<subject>/<kind>/ (default: new_output)",
-    )
-    content_group.add_argument(
-        "--folder-path",
-        type=Path,
-        metavar="PATH",
-        help="Workspace folder; serve generated content from <PATH>/output",
     )
     parser.add_argument("--response-dir", type=Path, default=DEFAULT_RESPONSE_DIR)
     parser.add_argument("--static-dir", type=Path, default=DEFAULT_STATIC_DIR)
@@ -1290,9 +1205,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parsed = parser.parse_args(argv)
     if parsed.lan and parsed.host == "127.0.0.1":
         parsed.host = "0.0.0.0"
-    if parsed.folder_path is not None:
-        parsed.folder_path = parsed.folder_path.expanduser().resolve()
-        parsed.output_dir = parsed.folder_path / "output"
     return parsed
 
 

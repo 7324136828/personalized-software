@@ -6,7 +6,7 @@
  * pass the pieces in rather than subclassing.
  */
 
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import type { Loaded } from "../lib/content";
 
 export interface LibraryShellProps<T> {
@@ -38,16 +38,59 @@ export function LibraryShell<T>({
   loading = false,
   emptyMessage = "No documents found.",
 }: LibraryShellProps<T>) {
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  useEffect(() => {
+    if (!sidebarOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSidebarOpen(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [sidebarOpen]);
+
   if (loading) {
     return <div className="placeholder">Loading…</div>;
   }
+
+  const selectedTitle = documents[selectedIndex]
+    ? titleOf(documents[selectedIndex].doc)
+    : "Choose a document";
 
   return (
     <div className="shell">
       {toolbar ? <div className="toolbar">{toolbar}</div> : null}
 
+      <div className="mobile-library-bar">
+        <button
+          type="button"
+          className="sidebar-toggle"
+          aria-expanded={sidebarOpen}
+          aria-controls="library-sidebar"
+          onClick={() => setSidebarOpen(true)}
+        >
+          <span className="sidebar-toggle-label">Library &amp; details</span>
+          <span className="sidebar-toggle-current">{selectedTitle}</span>
+          <span aria-hidden="true">&#9776;</span>
+        </button>
+      </div>
+
       <div className="shell-body">
-        <aside className="sidebar">
+        {sidebarOpen ? (
+          <button
+            type="button"
+            className="sidebar-scrim"
+            aria-label="Close library"
+            onClick={() => setSidebarOpen(false)}
+          />
+        ) : null}
+        <aside id="library-sidebar" className={sidebarOpen ? "sidebar open" : "sidebar"}>
+          <div className="sidebar-mobile-header">
+            <strong>Library &amp; details</strong>
+            <button type="button" aria-label="Close library" onClick={() => setSidebarOpen(false)}>
+              Close
+            </button>
+          </div>
           <h2 className="sidebar-heading">Library</h2>
           {documents.length === 0 ? (
             <p className="muted small">{emptyMessage}</p>
@@ -60,7 +103,10 @@ export function LibraryShell<T>({
                     role="option"
                     aria-selected={index === selectedIndex}
                     className={index === selectedIndex ? "doc active" : "doc"}
-                    onClick={() => onSelect(index)}
+                    onClick={() => {
+                      onSelect(index);
+                      setSidebarOpen(false);
+                    }}
                   >
                     {titleOf(item.doc)}
                   </button>
