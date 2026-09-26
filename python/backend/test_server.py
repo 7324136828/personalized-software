@@ -4,18 +4,27 @@ from __future__ import annotations
 
 import io
 import json
+import sqlite3
 import tempfile
 import threading
 import time
 import unittest
 import zipfile
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
-from backend.server import DEFAULT_OUTPUT_DIR, create_server, parse_args
+from backend.content_store import ContentStore
+from backend.server import (
+    DEFAULT_OUTPUT_DIR,
+    KINDS,
+    create_server,
+    migrate_workspace_archives,
+    parse_args,
+)
 
 
 class ArgumentTest(unittest.TestCase):
@@ -109,7 +118,7 @@ class BackendTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(manifest["kinds"]["qandas"][0]["file"], "reflection.json")
 
-    def test_zip_workspace_is_extracted_listed_and_loaded(self) -> None:
+    def test_zip_workspace_is_stored_in_sqlite_listed_and_loaded(self) -> None:
         archive_bytes = io.BytesIO()
         with zipfile.ZipFile(archive_bytes, "w", zipfile.ZIP_DEFLATED) as archive:
             for name in ("alpha", "beta"):
@@ -123,6 +132,10 @@ class BackendTest(unittest.TestCase):
                         }
                     ),
                 )
+            archive.writestr(
+                "bundle/alpha/output/podcasts/narrator.pt",
+                b"local-voice-model",
+            )
 
         status, _ = self.request("/api/workspace")
         self.assertEqual(status, 200)
@@ -135,6 +148,25 @@ class BackendTest(unittest.TestCase):
             [workspace["name"] for workspace in uploaded["workspaces"]],
             ["alpha", "beta"],
         )
+        database = self.archives / "study-notes.sqlite3"
+        self.assertTrue(database.is_file())
+        with closing(sqlite3.connect(database)) as connection:
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM content").fetchone()[0],
+                2,
+            )
+        self.assertTrue(
+            (
+                self.archives
+                / "voices"
+                / uploaded["upload"]["id"]
+                / "alpha"
+                / "output"
+                / "podcasts"
+                / "narrator.pt"
+            ).is_file()
+        )
+        self.assertFalse((self.archives / uploaded["upload"]["id"]).exists())
 
         _, listing = self.request("/api/workspace/uploads")
         self.assertEqual(len(listing["uploads"]), 1)
@@ -161,6 +193,8 @@ class BackendTest(unittest.TestCase):
             [entry["file"] for entry in manifest["kinds"]["qandas"]],
             ["beta.json"],
         )
+        _, document = self.request("/api/content/qandas/beta.json")
+        self.assertEqual(document["title"], "Beta")
 
     def test_local_folder_selection_endpoint_is_not_available(self) -> None:
         with self.assertRaises(HTTPError) as raised:
@@ -291,6 +325,58 @@ class BackendTest(unittest.TestCase):
             server.podcast_render.render_library = original
             server.podcast_job.update(state="idle", startedAt=None, finishedAt=None, result=None)
 
+    def test_imported_podcast_refresh_writes_audio_back_to_sqlite(self) -> None:
+        from backend import server
+
+        episode = {
+            "episode_title": "Imported Episode",
+            "podcast_show": "Test Show",
+            "cast": [{"speaker_id": "host", "voice_file": "narrator.pt"}],
+            "script": [
+                {
+                    "segment_name": "Intro",
+                    "scenes": [{"speaker_id": "host", "dialogue": "Hello."}],
+                }
+            ],
+        }
+        archive_bytes = io.BytesIO()
+        with zipfile.ZipFile(archive_bytes, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("lesson/output/podcasts/imported.json", json.dumps(episode))
+            archive.writestr("lesson/output/podcasts/narrator.pt", b"voice")
+        self.upload("podcast.zip", archive_bytes.getvalue())
+
+        def fake_render_library(paths, **kwargs):
+            del kwargs
+            self.assertEqual([path.name for path in paths], ["imported.json"])
+            self.assertTrue((paths[0].parent / "narrator.pt").is_file())
+            paths[0].with_suffix(".mp3").write_bytes(b"ID3-imported")
+            return {"generated": ["imported.mp3"], "skipped": [], "failed": []}
+
+        server.podcast_job.update(state="idle", startedAt=None, finishedAt=None, result=None)
+        try:
+            with patch(
+                "backend.server.podcast_render.render_library",
+                side_effect=fake_render_library,
+            ):
+                status, started = self.request("/api/generate_podcast", "POST", {})
+                self.assertEqual(status, 202)
+                self.assertEqual(started["podcasts"], 1)
+                for _ in range(100):
+                    _, state = self.request("/api/generate_podcast")
+                    if state["state"] == "done":
+                        break
+                    time.sleep(0.02)
+            self.assertEqual(state["state"], "done")
+            _, manifest = self.request("/api/content/manifest")
+            self.assertEqual(
+                manifest["kinds"]["podcasts"][0]["sidecars"],
+                ["imported.mp3"],
+            )
+            with urlopen(self.base + "/api/content/podcasts/imported.mp3") as response:
+                self.assertEqual(response.read(), b"ID3-imported")
+        finally:
+            server.podcast_job.update(state="idle", startedAt=None, finishedAt=None, result=None)
+
     def test_podcast_log_endpoint_returns_incremental_render_messages(self) -> None:
         from backend import server
 
@@ -320,6 +406,46 @@ class BackendTest(unittest.TestCase):
         with self.assertRaises(HTTPError) as raised:
             self.request("/api/generate_podcast/logs?limit=0")
         self.assertEqual(raised.exception.code, 400)
+
+
+class LegacyMigrationTest(unittest.TestCase):
+    def test_extracted_upload_is_moved_into_sqlite(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            archive_dir = Path(temporary) / "workspaces"
+            upload_id = "a" * 32
+            legacy = archive_dir / upload_id
+            collection = legacy / "files" / "bundle"
+            qandas = collection / "lesson" / "output" / "qandas"
+            qandas.mkdir(parents=True)
+            (qandas / "lesson.json").write_text(
+                json.dumps({"title": "Migrated lesson", "questions": ["Why?"]}),
+                encoding="utf-8",
+            )
+            (legacy / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "id": upload_id,
+                        "name": "legacy",
+                        "originalFilename": "legacy.zip",
+                        "uploadedAt": "2026-01-01T00:00:00+00:00",
+                        "collectionRelative": "files/bundle",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            store = ContentStore(
+                archive_dir / "study-notes.sqlite3", archive_dir / "voices"
+            )
+
+            migrate_workspace_archives(archive_dir, store)
+
+            self.assertFalse(legacy.exists())
+            self.assertEqual(store.list_uploads()[0]["id"], upload_id)
+            workspace_id = store.list_workspaces(upload_id)[0]["id"]
+            manifest = store.manifest(workspace_id, KINDS, "now")
+            self.assertEqual(
+                manifest["kinds"]["qandas"][0]["title"], "Migrated lesson"
+            )
 
 
 class NestedLayoutTest(unittest.TestCase):

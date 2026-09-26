@@ -1,9 +1,9 @@
 """Serve generated content and temporary free-text Q&A sessions.
 
 The server intentionally uses only Python's standard library. Generated files
-are read directly from the active content directory on every request, so the
-React application does not need a separate data-sync step. The local website
-can switch that directory by uploading or reopening a workspace ZIP.
+are read directly from the active content directory on every request, while
+workspace ZIP imports are persisted in SQLite. The React application does not
+need a separate data-sync step.
 
 Content is organised per subject: ``new_output/<subject>/<kind>/<file>`` (for
 example ``new_output/classical_chinese/quizzes/quiz_heart_sutra.json``). The
@@ -24,6 +24,7 @@ import os
 import re
 import shutil
 import socket
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -42,8 +43,10 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 try:  # imported as ``backend.server`` (tests, package context)
     from backend import podcast_render
+    from backend.content_store import ContentStore
 except ImportError:  # run directly: ``python python/backend/server.py``
     import podcast_render
+    from content_store import ContentStore
 
 
 # server.py lives at <repo>/python/backend/server.py
@@ -104,8 +107,9 @@ def workspace_directories(collection: Path) -> list[Path]:
 class ContentState:
     """Thread-safe content location shared by every request handler."""
 
-    def __init__(self, output_dir: Path) -> None:
+    def __init__(self, output_dir: Path, store: ContentStore) -> None:
         self._lock = threading.RLock()
+        self.store = store
         resolved = output_dir.resolve()
         workspace = resolved.parent if resolved.name.casefold() == "output" else None
         self._collection_dir: Path | None = None
@@ -115,6 +119,7 @@ class ContentState:
                 "name": workspace.name if workspace is not None else resolved.name,
                 "workspaceDirectory": str(workspace) if workspace is not None else None,
                 "outputDirectory": str(resolved),
+                "databaseWorkspaceId": None,
             }
         }
         self._active_workspace = "initial"
@@ -122,58 +127,101 @@ class ContentState:
     @property
     def output_dir(self) -> Path:
         with self._lock:
-            return Path(self._workspaces[self._active_workspace]["outputDirectory"])
+            output = self._workspaces[self._active_workspace]["outputDirectory"]
+            if output is None:
+                raise ValueError("Imported content is stored in SQLite")
+            return Path(output)
 
-    def select_collection(self, collection: Path) -> Path:
-        collection = collection.expanduser().resolve()
-        candidates = workspace_directories(collection)
-        if not candidates:
-            raise ValueError(
-                "The selected folder must contain an output folder, or have immediate "
-                "subfolders that contain output folders"
-            )
+    @property
+    def database_workspace_id(self) -> str | None:
+        with self._lock:
+            value = self._workspaces[self._active_workspace].get("databaseWorkspaceId")
+            return str(value) if value is not None else None
 
+    def select_upload(self, upload_id: str) -> None:
+        rows = self.store.list_workspaces(upload_id)
+        if not rows:
+            raise ValueError("The uploaded workspace could not be loaded")
         workspaces: dict[str, dict[str, str | None]] = {}
-        for workspace in candidates:
-            identifier = "." if workspace == collection else workspace.name
+        for row in rows:
+            identifier = row["workspace_key"]
             workspaces[identifier] = {
                 "id": identifier,
-                "name": workspace.name,
-                "workspaceDirectory": str(workspace),
-                "outputDirectory": str(workspace / "output"),
+                "name": row["name"],
+                "workspaceDirectory": None,
+                "outputDirectory": None,
+                "databaseWorkspaceId": row["id"],
             }
         with self._lock:
-            self._collection_dir = collection
+            self._collection_dir = None
             self._workspaces = workspaces
             self._active_workspace = next(iter(workspaces))
-            return Path(workspaces[self._active_workspace]["outputDirectory"])
 
     def activate_workspace(self, identifier: str) -> Path:
         with self._lock:
             workspace = self._workspaces.get(identifier)
             if workspace is None:
                 raise ValueError("The requested workspace is not in the selected folder")
-            output_dir = Path(workspace["outputDirectory"])
-            if not output_dir.is_dir():
-                raise ValueError(f"The workspace output folder no longer exists: {output_dir}")
+            database_id = workspace.get("databaseWorkspaceId")
+            output_value = workspace.get("outputDirectory")
+            if database_id is not None:
+                if not self.store.workspace_exists(str(database_id)):
+                    raise ValueError("The workspace no longer exists in SQLite")
+            elif output_value is None or not Path(output_value).is_dir():
+                raise ValueError(f"The workspace output folder no longer exists: {output_value}")
             self._active_workspace = identifier
-            return output_dir
+            return Path(output_value) if output_value is not None else self.store.database
 
     def status(self) -> dict[str, Any]:
         with self._lock:
             active = self._workspaces[self._active_workspace]
-            output_dir = Path(active["outputDirectory"])
+            output_value = active.get("outputDirectory")
+            database_id = active.get("databaseWorkspaceId")
+            exists = (
+                self.store.workspace_exists(str(database_id))
+                if database_id is not None
+                else output_value is not None and Path(output_value).is_dir()
+            )
             return {
                 "collectionDirectory": (
                     str(self._collection_dir) if self._collection_dir is not None else None
                 ),
                 "activeWorkspace": self._active_workspace,
                 "workspaces": list(self._workspaces.values()),
-                "outputDirectory": str(output_dir),
+                "outputDirectory": (
+                    str(output_value)
+                    if output_value is not None
+                    else f"SQLite: {self.store.database}"
+                ),
                 "workspace": active["workspaceDirectory"],
-                "exists": output_dir.is_dir(),
+                "exists": exists,
             }
 
+    def manifest(self) -> dict[str, Any]:
+        database_id = self.database_workspace_id
+        if database_id is not None:
+            return self.store.manifest(database_id, KINDS, utc_now())
+        return build_manifest(self.output_dir)
+
+    def read_content(self, kind: str, filename: str) -> tuple[bytes, str]:
+        database_id = self.database_workspace_id
+        if database_id is not None:
+            return self.store.read_content(database_id, kind, filename)
+        for kind_dir in kind_dirs(self.output_dir, kind):
+            candidate = safe_child(kind_dir, filename)
+            if not candidate.is_file():
+                continue
+            try:
+                body = candidate.read_bytes()
+            except OSError as error:
+                raise FileNotFoundError(filename) from error
+            content_type = (
+                "application/json"
+                if candidate.suffix.casefold() == ".json"
+                else mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
+            )
+            return body, content_type
+        raise FileNotFoundError(filename)
 
 def _archive_member_path(extract_root: Path, member_name: str) -> Path:
     normalized = member_name.replace("\\", "/")
@@ -218,8 +266,9 @@ def import_workspace_archive(
     content_length: int,
     filename: str,
     archive_dir: Path,
-) -> tuple[dict[str, Any], Path]:
-    """Persist and safely extract an uploaded workspace ZIP in the temp area."""
+    store: ContentStore,
+) -> dict[str, Any]:
+    """Safely unpack a ZIP, then persist its learning content in SQLite."""
     original_name = Path(filename).name
     if not original_name.lower().endswith(".zip"):
         raise ValueError("Only .zip workspace archives can be uploaded")
@@ -277,63 +326,37 @@ def import_workspace_archive(
             "collectionRelative": collection.relative_to(staging).as_posix(),
             "workspaceCount": len(workspace_directories(collection)),
         }
-        (staging / "metadata.json").write_text(
-            json.dumps(metadata, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        archive_path.unlink()
-        final_dir = archive_dir / identifier
-        staging.replace(final_dir)
-        return metadata, final_dir / metadata["collectionRelative"]
-    except (OSError, RuntimeError) as error:
-        raise ValueError(f"The workspace ZIP could not be extracted: {error}") from error
+        store.import_collection(metadata, collection, KINDS)
+        return metadata
+    except (OSError, RuntimeError, sqlite3.Error) as error:
+        raise ValueError(f"The workspace ZIP could not be imported: {error}") from error
     finally:
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
 
 
-def list_workspace_archives(archive_dir: Path) -> list[dict[str, Any]]:
-    """List valid, previously extracted workspace ZIPs."""
+def migrate_workspace_archives(archive_dir: Path, store: ContentStore) -> None:
+    """Move uploads created by older releases from extracted files into SQLite."""
     archive_dir.mkdir(parents=True, exist_ok=True)
-    uploads: list[dict[str, Any]] = []
     for metadata_path in archive_dir.glob("*/metadata.json"):
+        legacy_dir = metadata_path.parent
         try:
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
             identifier = metadata["id"]
             if not isinstance(identifier, str) or not SESSION_ID.fullmatch(identifier):
                 continue
-            collection = safe_child(metadata_path.parent, metadata["collectionRelative"])
-            workspaces = workspace_directories(collection)
-            if not workspaces:
+            collection = safe_child(legacy_dir, metadata["collectionRelative"])
+            if not workspace_directories(collection):
                 continue
-            uploads.append(
-                {
-                    "id": identifier,
-                    "name": str(metadata["name"]),
-                    "originalFilename": str(metadata["originalFilename"]),
-                    "uploadedAt": str(metadata["uploadedAt"]),
-                    "workspaceCount": len(workspaces),
-                }
-            )
-        except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+            # Re-import even if a row exists so a previously interrupted
+            # migration also repairs any voice files before cleanup.
+            store.import_collection(metadata, collection, KINDS)
+            # The transaction (and voice copy, when present) completed before
+            # removing the old extracted study-note tree.
+            shutil.rmtree(legacy_dir)
+        except (KeyError, OSError, RuntimeError, TypeError, ValueError, sqlite3.Error, json.JSONDecodeError):
+            # A bad legacy upload must not prevent the application from starting.
             continue
-    uploads.sort(key=lambda item: item["uploadedAt"], reverse=True)
-    return uploads
-
-
-def workspace_archive_collection(archive_dir: Path, identifier: str) -> Path:
-    """Resolve a saved upload ID to its validated extracted collection."""
-    if not SESSION_ID.fullmatch(identifier):
-        raise ValueError("Invalid uploaded workspace ID")
-    upload_dir = safe_child(archive_dir, identifier)
-    try:
-        metadata = json.loads((upload_dir / "metadata.json").read_text(encoding="utf-8"))
-        collection = safe_child(upload_dir, metadata["collectionRelative"])
-    except (KeyError, OSError, TypeError, json.JSONDecodeError) as error:
-        raise ValueError("The uploaded workspace could not be loaded") from error
-    if not workspace_directories(collection):
-        raise ValueError("The uploaded workspace no longer contains any output folders")
-    return collection
 
 
 def _flashcard_audio_path(cache_dir: Path, text: str, voice: str) -> Path:
@@ -677,7 +700,10 @@ def podcast_script_paths(output_dir: Path) -> list[Path]:
     return paths
 
 
-def _run_podcast_job(episode_paths: list[Path]) -> None:
+def _run_podcast_job(
+    episode_paths: list[Path],
+    imported: tuple[ContentStore, str, Path, Path] | None = None,
+) -> None:
     PODCAST_LOG.info(
         "Podcast render started: %d script(s), device=%s",
         len(episode_paths),
@@ -689,6 +715,9 @@ def _run_podcast_job(episode_paths: list[Path]) -> None:
             device=PODCAST_DEVICE,
             checkpoint_dir=PODCAST_CHECKPOINT_DIR,
         )
+        if imported is not None:
+            store, workspace_id, _root, output = imported
+            store.save_podcast_outputs(workspace_id, output)
         state = "done"
         PODCAST_LOG.info(
             "Podcast render finished: %d generated, %d skipped, %d failed",
@@ -700,17 +729,42 @@ def _run_podcast_job(episode_paths: list[Path]) -> None:
         result = {"error": str(error)}
         state = "error"
         PODCAST_LOG.exception("Podcast render stopped with an unexpected error")
+    finally:
+        if imported is not None:
+            shutil.rmtree(imported[2], ignore_errors=True)
     with PODCAST_JOB_LOCK:
         podcast_job["state"] = state
         podcast_job["result"] = result
         podcast_job["finishedAt"] = utc_now()
 
 
-def start_podcast_job(output_dir: Path) -> dict[str, Any]:
+def start_podcast_job(
+    output_dir: Path | None = None,
+    *,
+    store: ContentStore | None = None,
+    workspace_id: str | None = None,
+) -> dict[str, Any]:
     """Kick off podcast rendering in a background thread; return immediately."""
-    episode_paths = podcast_script_paths(output_dir)
     with PODCAST_JOB_LOCK:
         if podcast_job["state"] == "running":
+            return {"status": "already running", "startedAt": podcast_job["startedAt"]}
+
+    imported: tuple[ContentStore, str, Path, Path] | None = None
+    if workspace_id is not None:
+        if store is None:
+            raise ValueError("SQLite content store is required")
+        root, imported_output, episode_paths = store.materialize_podcasts(workspace_id)
+        imported = (store, workspace_id, root, imported_output)
+    elif output_dir is not None:
+        episode_paths = podcast_script_paths(output_dir)
+    else:
+        raise ValueError("A content source is required")
+    with PODCAST_JOB_LOCK:
+        # Another request may have started while imported scripts were being
+        # materialized. Discard this request's temporary copy in that case.
+        if podcast_job["state"] == "running":
+            if imported is not None:
+                shutil.rmtree(imported[2], ignore_errors=True)
             return {"status": "already running", "startedAt": podcast_job["startedAt"]}
         PODCAST_LOG_HANDLER.clear()
         podcast_job.update(
@@ -718,7 +772,7 @@ def start_podcast_job(output_dir: Path) -> dict[str, Any]:
         )
         PODCAST_LOG.info("Queued %d podcast script(s) for rendering", len(episode_paths))
     threading.Thread(
-        target=_run_podcast_job, args=(episode_paths,), daemon=True
+        target=_run_podcast_job, args=(episode_paths, imported), daemon=True
     ).start()
     return {"status": "started", "podcasts": len(episode_paths)}
 
@@ -853,11 +907,11 @@ class LearningRequestHandler(SimpleHTTPRequestHandler):
                     return
                 self._json(
                     HTTPStatus.OK,
-                    {"uploads": list_workspace_archives(self.workspace_archive_dir)},
+                    {"uploads": self.content_state.store.list_uploads()},
                 )
                 return
             if path == "/api/content/manifest":
-                self._json(HTTPStatus.OK, build_manifest(self.output_dir))
+                self._json(HTTPStatus.OK, self.content_state.manifest())
                 return
             if path.startswith("/api/flashcards/audio/"):
                 self._serve_flashcard_audio(path.removeprefix("/api/flashcards/audio/"))
@@ -926,13 +980,14 @@ class LearningRequestHandler(SimpleHTTPRequestHandler):
                 except ValueError as error:
                     raise ValueError("Invalid Content-Length") from error
                 filename = unquote(self.headers.get("X-File-Name") or "workspace.zip")
-                upload, collection = import_workspace_archive(
+                upload = import_workspace_archive(
                     self.rfile,
                     content_length,
                     filename,
                     self.workspace_archive_dir,
+                    self.content_state.store,
                 )
-                self.content_state.select_collection(collection)
+                self.content_state.select_upload(upload["id"])
                 self._json(
                     HTTPStatus.CREATED,
                     {**self.content_state.status(), "upload": upload},
@@ -971,11 +1026,9 @@ class LearningRequestHandler(SimpleHTTPRequestHandler):
                 identifier = payload.get("uploadId") if isinstance(payload, dict) else None
                 if not isinstance(identifier, str) or not identifier:
                     raise ValueError("uploadId must be a non-empty string")
-                collection = workspace_archive_collection(
-                    self.workspace_archive_dir,
-                    identifier,
-                )
-                self.content_state.select_collection(collection)
+                if not SESSION_ID.fullmatch(identifier):
+                    raise ValueError("Invalid uploaded workspace ID")
+                self.content_state.select_upload(identifier)
                 self._json(HTTPStatus.OK, self.content_state.status())
             except ValueError as error:
                 self._error(HTTPStatus.BAD_REQUEST, str(error))
@@ -986,7 +1039,15 @@ class LearningRequestHandler(SimpleHTTPRequestHandler):
             # tree. Rendering runs in a background thread; poll GET
             # /api/generate_podcast for progress.
             self._drain_body()
-            self._json(HTTPStatus.ACCEPTED, start_podcast_job(self.output_dir))
+            database_id = self.content_state.database_workspace_id
+            self._json(
+                HTTPStatus.ACCEPTED,
+                start_podcast_job(
+                    None if database_id is not None else self.output_dir,
+                    store=self.content_state.store,
+                    workspace_id=database_id,
+                ),
+            )
             return
         if path != "/api/qa/sessions":
             self._error(HTTPStatus.NOT_FOUND, "API endpoint not found")
@@ -1014,29 +1075,7 @@ class LearningRequestHandler(SimpleHTTPRequestHandler):
         kind, separator, file_name = relative.partition("/")
         if not separator or kind not in KINDS or not file_name:
             raise FileNotFoundError(relative)
-        # The manifest merges every subject into one list per kind, so a request
-        # only carries "<kind>/<file>". Look through each subject's kind folder
-        # (and the legacy flat folder) for the first match.
-        path = None
-        for kind_dir in kind_dirs(self.output_dir, kind):
-            candidate = safe_child(kind_dir, file_name)
-            if candidate.is_file():
-                path = candidate
-                break
-        if path is None:
-            raise FileNotFoundError(relative)
-        try:
-            body = path.read_bytes()
-        except OSError as error:
-            # A transient read failure (for example the file briefly locked by an
-            # editor on Windows) must still produce a proper HTTP response rather
-            # than an aborted connection, which the app would report as a network
-            # "Failed to fetch" error.
-            raise FileNotFoundError(relative) from error
-        if path.suffix == ".json":
-            content_type = "application/json"
-        else:
-            content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        body, content_type = self.content_state.read_content(kind, file_name)
         if content_type.startswith("text/") or content_type in {"application/json", "image/svg+xml"}:
             content_type += "; charset=utf-8"
         self.send_response(HTTPStatus.OK)
@@ -1082,13 +1121,19 @@ def create_server(
     workspace_archive_dir: Path = DEFAULT_WORKSPACE_ARCHIVE_DIR,
     flashcard_audio_dir: Path = DEFAULT_FLASHCARD_AUDIO_DIR,
 ) -> ThreadingHTTPServer:
-    content_state = ContentState(output_dir)
+    workspace_archive_dir = workspace_archive_dir.resolve()
+    store = ContentStore(
+        workspace_archive_dir / "study-notes.sqlite3",
+        workspace_archive_dir / "voices",
+    )
+    migrate_workspace_archives(workspace_archive_dir, store)
+    content_state = ContentState(output_dir, store)
     handler = partial(
         LearningRequestHandler,
         content_state=content_state,
         response_dir=response_dir.resolve(),
         static_dir=static_dir.resolve(),
-        workspace_archive_dir=workspace_archive_dir.resolve(),
+        workspace_archive_dir=workspace_archive_dir,
         flashcard_audio_dir=flashcard_audio_dir.resolve(),
     )
     return ThreadingHTTPServer((host, port), handler)

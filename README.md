@@ -18,8 +18,12 @@ http://localhost:4173, and opens the Q&A view. Use `run.bat dev` for hot reload,
 After the website opens, use **Upload ZIP** to import a workspace collection.
 The ZIP may contain one workspace with `output`, or immediate subfolders that
 each contain `output`. Use the output dropdown to switch between them.
-**Load existing workspace** reopens any previously uploaded ZIP from the
-operating system's temporary `personalized-software/workspaces` directory.
+**Load existing workspace** reopens previously uploaded study content from
+`personalized-software/workspaces/study-notes.sqlite3` in the operating
+system's temporary directory. Imported notes and generated artifacts are kept
+in SQLite; custom Kokoro `.pt` voice models and the narration cache remain as
+files because the audio runtime requires filesystem paths. Older extracted
+uploads are migrated into the database automatically on startup.
 
 Use `run.bat --lan` to open the site from another computer on the same network.
 Remote sessions can switch outputs, upload ZIPs, and load existing uploads.

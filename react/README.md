@@ -18,11 +18,14 @@ uploaded ZIP from the website header. Each immediate subfolder with an `output`
 directory appears in the output dropdown. Newly generated content appears after
 clicking **Reload content**.
 
-Use **Upload ZIP** to extract a workspace collection into the operating system's
-temporary `personalized-software/workspaces` directory. Uploaded archives may
-be up to 512 MB compressed, 2 GB extracted, and 20,000 files; unsafe paths,
-symbolic links, and encrypted ZIPs are rejected. **Load existing workspace**
-lists valid uploads that are still present in that temporary directory.
+Use **Upload ZIP** to import a workspace collection into the SQLite database at
+the operating system's temporary
+`personalized-software/workspaces/study-notes.sqlite3`. Uploaded archives may
+be up to 512 MB compressed, 2 GB expanded during validation, and 20,000 files;
+unsafe paths, symbolic links, and encrypted ZIPs are rejected. Custom Kokoro
+`.pt` voice models and the synthesized flashcard narration cache remain
+file-backed. Older extracted uploads are migrated automatically. **Load
+existing workspace** lists imports held in the database.
 
 When the app is started with `run.bat --lan`, another computer can also use the
 output dropdown, **Upload ZIP**, and **Load existing workspace**.
@@ -48,7 +51,8 @@ From this directory, the equivalent npm scripts are:
 ## Data flow
 
 After an output is selected in the website, `../python/backend/server.py`
-builds a manifest from that `output` folder on every request, merging every
+builds a manifest from SQLite for imported workspaces, or from the configured
+`output` folder for locally generated content, merging every
 subject folder (`output/<subject>/<kind>/`) into one list per kind. It serves
 JSON and related files (`.md`, `.html`, `.svg`,
 `.csv`, `.mmd`, `.txt`, and `.wireframe.txt`) under `/api/content`. The browser
