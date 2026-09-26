@@ -15,7 +15,7 @@ import tempfile
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 
 
 VOICE_SUFFIXES = {".pt"}
@@ -125,11 +125,13 @@ class ContentStore:
         metadata: dict[str, Any],
         collection: Path,
         kinds: Iterable[str],
+        workspaces: list[tuple[str, str, Path, str]] | None = None,
+        progress: Callable[[int, int, str], None] | None = None,
     ) -> None:
         """Atomically replace an upload with documents read from ``collection``."""
         upload_id = str(metadata["id"])
-        workspaces = self._workspace_rows(collection)
-        if not workspaces:
+        workspace_rows = workspaces or self._workspace_rows(collection)
+        if not workspace_rows:
             raise ValueError("The imported collection has no workspaces")
 
         pending_voice_dir = Path(
@@ -138,9 +140,18 @@ class ContentStore:
         final_voice_dir = self.voice_dir / upload_id
         voice_rows: list[tuple[str, str]] = []
         try:
-            for source in collection.rglob("*"):
-                if not source.is_file() or source.suffix.casefold() not in VOICE_SUFFIXES:
-                    continue
+            voice_roots = (
+                [workspace for _key, _name, workspace, _relative in workspace_rows]
+                if workspaces is not None
+                else [collection]
+            )
+            voice_sources = {
+                source
+                for root in voice_roots
+                for source in root.rglob("*")
+                if source.is_file() and source.suffix.casefold() in VOICE_SUFFIXES
+            }
+            for source in sorted(voice_sources, key=lambda path: path.as_posix().casefold()):
                 relative = source.relative_to(collection)
                 destination = pending_voice_dir / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
@@ -159,7 +170,10 @@ class ContentStore:
                         str(metadata["uploadedAt"]),
                     ),
                 )
-                for key, name, workspace, relative in workspaces:
+                total_workspaces = len(workspace_rows)
+                for index, (key, name, workspace, relative) in enumerate(workspace_rows):
+                    if progress is not None:
+                        progress(index, total_workspaces, name)
                     workspace_id = uuid.uuid5(
                         uuid.NAMESPACE_URL, f"personalized-software:{upload_id}:{key}"
                     ).hex
@@ -187,6 +201,8 @@ class ContentStore:
                                 content_type,
                             ),
                         )
+                if progress is not None:
+                    progress(total_workspaces, total_workspaces, workspace_rows[-1][1])
                 connection.executemany(
                     "INSERT INTO voice_assets(upload_id, relative_path, file_path) VALUES (?, ?, ?)",
                     ((upload_id, relative, file_path) for relative, file_path in voice_rows),
@@ -214,6 +230,18 @@ class ContentStore:
                 ORDER BY u.uploaded_at DESC
                 """
             ).fetchall()
+            workspace_rows = connection.execute(
+                "SELECT id, upload_id, workspace_key, name FROM workspaces ORDER BY rowid"
+            ).fetchall()
+        study_sets: dict[str, list[dict[str, str]]] = {}
+        for workspace in workspace_rows:
+            study_sets.setdefault(workspace["upload_id"], []).append(
+                {
+                    "id": workspace["id"],
+                    "key": workspace["workspace_key"],
+                    "name": workspace["name"],
+                }
+            )
         return [
             {
                 "id": row["id"],
@@ -221,6 +249,7 @@ class ContentStore:
                 "originalFilename": row["original_filename"],
                 "uploadedAt": row["uploaded_at"],
                 "workspaceCount": row["workspace_count"],
+                "studySets": study_sets.get(row["id"], []),
             }
             for row in rows
         ]
@@ -240,6 +269,99 @@ class ContentStore:
                 "SELECT 1 FROM workspaces WHERE id = ?", (workspace_id,)
             ).fetchone()
         return row is not None
+
+    def delete_workspace(self, workspace_id: str) -> dict[str, Any]:
+        """Delete one study set and its parent upload when it becomes empty."""
+        with self._connect() as connection:
+            workspace = connection.execute(
+                "SELECT upload_id, workspace_key, name, relative_path "
+                "FROM workspaces WHERE id = ?",
+                (workspace_id,),
+            ).fetchone()
+            if workspace is None:
+                raise ValueError("The study set no longer exists")
+            upload_id = str(workspace["upload_id"])
+            workspace_key = str(workspace["workspace_key"])
+            name = str(workspace["name"])
+            relative_path = str(workspace["relative_path"]).rstrip("/")
+            voice_rows = connection.execute(
+                "SELECT relative_path, file_path FROM voice_assets WHERE upload_id = ?",
+                (upload_id,),
+            ).fetchall()
+            deleted_voices = [
+                (str(row["relative_path"]), str(row["file_path"]))
+                for row in voice_rows
+                if not relative_path
+                or str(row["relative_path"]) == relative_path
+                or str(row["relative_path"]).startswith(f"{relative_path}/")
+            ]
+            connection.executemany(
+                "DELETE FROM voice_assets WHERE upload_id = ? AND relative_path = ?",
+                ((upload_id, relative) for relative, _file_path in deleted_voices),
+            )
+            connection.execute("DELETE FROM workspaces WHERE id = ?", (workspace_id,))
+            remaining = connection.execute(
+                "SELECT COUNT(*) FROM workspaces WHERE upload_id = ?", (upload_id,)
+            ).fetchone()[0]
+            library_deleted = remaining == 0
+            if library_deleted:
+                connection.execute("DELETE FROM uploads WHERE id = ?", (upload_id,))
+        upload_voice_dir: Path | None = (self.voice_dir / upload_id).resolve()
+        try:
+            upload_voice_dir.relative_to(self.voice_dir)
+        except ValueError:
+            upload_voice_dir = None
+        if library_deleted and upload_voice_dir is not None:
+            shutil.rmtree(upload_voice_dir, ignore_errors=True)
+        elif upload_voice_dir is not None:
+            for _relative, file_path in deleted_voices:
+                path = Path(file_path).resolve()
+                try:
+                    path.relative_to(upload_voice_dir)
+                    path.unlink(missing_ok=True)
+                    parent = path.parent
+                    while parent != upload_voice_dir and parent.is_relative_to(upload_voice_dir):
+                        parent.rmdir()
+                        parent = parent.parent
+                except (OSError, ValueError):
+                    # A locked or non-empty directory can be retried when the
+                    # parent library is eventually removed.
+                    continue
+        return {
+            "workspaceId": workspace_id,
+            "workspaceKey": workspace_key,
+            "name": name,
+            "uploadId": upload_id,
+            "libraryDeleted": library_deleted,
+        }
+
+    def delete_upload(self, upload_id: str) -> dict[str, Any]:
+        """Delete an imported ZIP library and every study set it contains."""
+        with self._connect() as connection:
+            upload = connection.execute(
+                "SELECT name FROM uploads WHERE id = ?", (upload_id,)
+            ).fetchone()
+            if upload is None:
+                raise ValueError("The study library no longer exists")
+            workspace_rows = connection.execute(
+                "SELECT id FROM workspaces WHERE upload_id = ?", (upload_id,)
+            ).fetchall()
+            workspace_ids = [str(row["id"]) for row in workspace_rows]
+            connection.execute("DELETE FROM uploads WHERE id = ?", (upload_id,))
+
+        upload_voice_dir = (self.voice_dir / upload_id).resolve()
+        try:
+            upload_voice_dir.relative_to(self.voice_dir)
+        except ValueError:
+            pass
+        else:
+            shutil.rmtree(upload_voice_dir, ignore_errors=True)
+        return {
+            "uploadId": upload_id,
+            "name": str(upload["name"]),
+            "workspaceIds": workspace_ids,
+            "workspaceCount": len(workspace_ids),
+        }
 
     def manifest(
         self,

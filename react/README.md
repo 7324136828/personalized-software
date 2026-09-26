@@ -13,10 +13,11 @@ run.bat dev
 ```
 
 This starts the backend and Vite together, then opens
-http://localhost:5174/#/qanda. Upload a workspace ZIP or load a previously
-uploaded ZIP from the website header. Each immediate subfolder with an `output`
-directory appears in the output dropdown. Newly generated content appears after
-clicking **Reload content**.
+http://localhost:5174/. The landing page lists the individual study sets in the
+current and saved libraries. Upload a workspace ZIP or load a previously
+uploaded ZIP from the website header. Each `output` directory listed by
+`workspace.json` appears as a study set using its declared name. Newly generated
+content appears after clicking **Reload content**.
 
 Use **Upload ZIP** to import a workspace collection into the SQLite database at
 the operating system's temporary
@@ -26,6 +27,26 @@ unsafe paths, symbolic links, and encrypted ZIPs are rejected. Custom Kokoro
 `.pt` voice models and the synthesized flashcard narration cache remain
 file-backed. Older extracted uploads are migrated automatically. **Load
 existing workspace** lists imports held in the database.
+Use **Delete** on a landing-page study-set card to remove that set. A confirmation
+is required; deleting the final set also removes its now-empty library.
+Use **Delete ZIP** in a library heading to remove the entire imported archive.
+
+Every new ZIP import must contain exactly one `workspace.json`. Paths are
+resolved relative to that file and must identify existing `output` directories:
+
+```json
+{
+  "workspace": [
+    {
+      "name": "An Introduction to Statistical Learning",
+      "path": "./an_introduction_to_statistical_learning/output"
+    }
+  ]
+}
+```
+
+While a ZIP is received, extracted, validated, and saved, the app displays a
+percentage and the name of the study set currently being processed.
 
 When the app is started with `run.bat --lan`, another computer can also use the
 output dropdown, **Upload ZIP**, and **Load existing workspace**.

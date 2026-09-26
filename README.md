@@ -12,18 +12,24 @@ run.bat
 ```
 
 It installs dependencies on first run, builds for production, serves on
-http://localhost:4173, and opens the Q&A view. Use `run.bat dev` for hot reload,
+http://localhost:4173, and opens the study-set landing page. Use `run.bat dev` for hot reload,
 `run.bat build` to build without serving, or `run.bat help` for all options.
 
 After the website opens, use **Upload ZIP** to import a workspace collection.
-The ZIP may contain one workspace with `output`, or immediate subfolders that
-each contain `output`. Use the output dropdown to switch between them.
+The ZIP must contain exactly one `workspace.json`. Its `workspace` array names
+each study set and points to its `output` folder. The app validates these paths,
+uses the declared names on the landing page, and shows live import progress for
+each study set. Use the output dropdown to switch between them.
 **Load existing workspace** reopens previously uploaded study content from
 `personalized-software/workspaces/study-notes.sqlite3` in the operating
 system's temporary directory. Imported notes and generated artifacts are kept
 in SQLite; custom Kokoro `.pt` voice models and the narration cache remain as
 files because the audio runtime requires filesystem paths. Older extracted
 uploads are migrated into the database automatically on startup.
+Individual saved study sets can be deleted from the landing page. Deleting the
+last set in a library also removes that empty library and its stored voice assets.
+The library-level **Delete ZIP** action removes every study set imported from that
+archive at once after confirmation.
 
 Use `run.bat --lan` to open the site from another computer on the same network.
 Remote sessions can switch outputs, upload ZIPs, and load existing uploads.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import http.client
 import json
 import sqlite3
 import tempfile
@@ -25,6 +26,24 @@ from backend.server import (
     migrate_workspace_archives,
     parse_args,
 )
+
+
+def write_workspace_json(
+    archive: zipfile.ZipFile,
+    workspaces: list[tuple[str, str]],
+    prefix: str = "",
+) -> None:
+    archive.writestr(
+        f"{prefix}workspace.json",
+        json.dumps(
+            {
+                "workspace": [
+                    {"name": name, "path": path}
+                    for name, path in workspaces
+                ]
+            }
+        ),
+    )
 
 
 class ArgumentTest(unittest.TestCase):
@@ -100,15 +119,18 @@ class BackendTest(unittest.TestCase):
         with urlopen(request) as response:
             return response.status, json.loads(response.read())
 
-    def upload(self, filename: str, body: bytes):
+    def upload(self, filename: str, body: bytes, upload_id: str | None = None):
+        headers = {
+            "Content-Type": "application/zip",
+            "X-File-Name": quote(filename),
+        }
+        if upload_id is not None:
+            headers["X-Upload-ID"] = upload_id
         request = Request(
             self.base + "/api/workspace/upload",
             data=body,
             method="POST",
-            headers={
-                "Content-Type": "application/zip",
-                "X-File-Name": quote(filename),
-            },
+            headers=headers,
         )
         with urlopen(request) as response:
             return response.status, json.loads(response.read())
@@ -121,6 +143,14 @@ class BackendTest(unittest.TestCase):
     def test_zip_workspace_is_stored_in_sqlite_listed_and_loaded(self) -> None:
         archive_bytes = io.BytesIO()
         with zipfile.ZipFile(archive_bytes, "w", zipfile.ZIP_DEFLATED) as archive:
+            write_workspace_json(
+                archive,
+                [
+                    ("Alpha actuarial notes", "./alpha/output"),
+                    ("Beta statistics notes", "./beta/output"),
+                ],
+                "bundle/",
+            )
             for name in ("alpha", "beta"):
                 archive.writestr(
                     f"bundle/{name}/output/qandas/{name}.json",
@@ -146,7 +176,7 @@ class BackendTest(unittest.TestCase):
         self.assertEqual(uploaded["upload"]["workspaceCount"], 2)
         self.assertEqual(
             [workspace["name"] for workspace in uploaded["workspaces"]],
-            ["alpha", "beta"],
+            ["Alpha actuarial notes", "Beta statistics notes"],
         )
         database = self.archives / "study-notes.sqlite3"
         self.assertTrue(database.is_file())
@@ -171,6 +201,10 @@ class BackendTest(unittest.TestCase):
         _, listing = self.request("/api/workspace/uploads")
         self.assertEqual(len(listing["uploads"]), 1)
         self.assertEqual(listing["uploads"][0]["id"], uploaded["upload"]["id"])
+        self.assertEqual(
+            [study_set["name"] for study_set in listing["uploads"][0]["studySets"]],
+            ["Alpha actuarial notes", "Beta statistics notes"],
+        )
 
         status, loaded = self.request(
             "/api/workspace/load",
@@ -195,6 +229,172 @@ class BackendTest(unittest.TestCase):
         )
         _, document = self.request("/api/content/qandas/beta.json")
         self.assertEqual(document["title"], "Beta")
+
+    def test_chunked_zip_upload_keeps_connection_in_sync(self) -> None:
+        archive_bytes = io.BytesIO()
+        with zipfile.ZipFile(archive_bytes, "w", zipfile.ZIP_DEFLATED) as archive:
+            write_workspace_json(
+                archive,
+                [("Cell Biology", "./biology/output")],
+            )
+            archive.writestr(
+                "biology/output/qandas/cells.json",
+                json.dumps(
+                    {"title": "Cells", "description": "Review", "questions": ["Why?"]}
+                ),
+            )
+        body = archive_bytes.getvalue()
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port)
+        try:
+            connection.request(
+                "POST",
+                "/api/workspace/upload",
+                body=(body[index:index + 37] for index in range(0, len(body), 37)),
+                headers={
+                    "Content-Type": "application/zip",
+                    "X-File-Name": "biology.zip",
+                },
+                encode_chunked=True,
+            )
+            response = connection.getresponse()
+            uploaded = json.loads(response.read())
+            self.assertEqual(response.status, 201)
+            self.assertEqual(uploaded["activeWorkspace"], "biology")
+
+            connection.request("GET", "/api/health")
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(json.loads(response.read()), {"status": "ok"})
+        finally:
+            connection.close()
+
+    def test_load_can_select_a_study_set(self) -> None:
+        archive_bytes = io.BytesIO()
+        with zipfile.ZipFile(archive_bytes, "w", zipfile.ZIP_DEFLATED) as archive:
+            write_workspace_json(
+                archive,
+                [("Alpha", "./alpha/output"), ("Beta", "./beta/output")],
+            )
+            for name in ("alpha", "beta"):
+                archive.writestr(
+                    f"{name}/output/qandas/{name}.json",
+                    json.dumps(
+                        {"title": name.title(), "description": "Review", "questions": ["Why?"]}
+                    ),
+                )
+        _, uploaded = self.upload("two-sets.zip", archive_bytes.getvalue())
+        status, selected = self.request(
+            "/api/workspace/load",
+            "POST",
+            {"uploadId": uploaded["upload"]["id"], "workspaceId": "beta"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(selected["activeWorkspace"], "beta")
+
+    def test_zip_without_workspace_json_is_rejected(self) -> None:
+        archive_bytes = io.BytesIO()
+        with zipfile.ZipFile(archive_bytes, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr(
+                "lesson/output/qandas/lesson.json",
+                json.dumps({"title": "Lesson", "questions": ["Why?"]}),
+            )
+        with self.assertRaises(HTTPError) as raised:
+            self.upload("missing-manifest.zip", archive_bytes.getvalue())
+        self.assertEqual(raised.exception.code, 400)
+        self.assertIn("workspace.json", raised.exception.read().decode("utf-8"))
+
+    def test_upload_progress_finishes_at_100_percent(self) -> None:
+        archive_bytes = io.BytesIO()
+        with zipfile.ZipFile(archive_bytes, "w", zipfile.ZIP_DEFLATED) as archive:
+            write_workspace_json(archive, [("Probability", "./probability/output")])
+            archive.writestr(
+                "probability/output/qandas/probability.json",
+                json.dumps({"title": "Probability", "questions": ["Why?"]}),
+            )
+        progress_id = "b" * 32
+        self.upload("progress.zip", archive_bytes.getvalue(), progress_id)
+        status, progress = self.request(
+            f"/api/workspace/uploads/progress/{progress_id}"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(progress["state"], "done")
+        self.assertEqual(progress["percent"], 100)
+        self.assertEqual(progress["totalWorkspaces"], 1)
+        self.assertEqual(progress["currentWorkspace"], "Probability")
+
+    def test_study_sets_can_be_deleted_individually(self) -> None:
+        archive_bytes = io.BytesIO()
+        with zipfile.ZipFile(archive_bytes, "w", zipfile.ZIP_DEFLATED) as archive:
+            write_workspace_json(
+                archive,
+                [("Alpha", "./alpha/output"), ("Beta", "./beta/output")],
+            )
+            for name in ("alpha", "beta"):
+                archive.writestr(
+                    f"{name}/output/qandas/{name}.json",
+                    json.dumps({"title": name.title(), "questions": ["Why?"]}),
+                )
+            archive.writestr("alpha/output/podcasts/narrator.pt", b"voice")
+            archive.writestr("beta/output/podcasts/narrator.pt", b"voice")
+
+        _, uploaded = self.upload("delete-sets.zip", archive_bytes.getvalue())
+        upload_id = uploaded["upload"]["id"]
+        _, listing = self.request("/api/workspace/uploads")
+        study_sets = {item["key"]: item for item in listing["uploads"][0]["studySets"]}
+        self.request("/api/workspace/activate", "POST", {"workspaceId": "beta"})
+
+        status, after_beta = self.request(
+            f"/api/workspace/study-sets/{study_sets['beta']['id']}", "DELETE"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(after_beta["activeWorkspace"], "alpha")
+        _, listing = self.request("/api/workspace/uploads")
+        self.assertEqual(
+            [item["name"] for item in listing["uploads"][0]["studySets"]],
+            ["Alpha"],
+        )
+        self.assertTrue(
+            (self.archives / "voices" / upload_id / "alpha" / "output" / "podcasts" / "narrator.pt").is_file()
+        )
+        self.assertFalse(
+            (self.archives / "voices" / upload_id / "beta" / "output" / "podcasts" / "narrator.pt").exists()
+        )
+
+        status, after_alpha = self.request(
+            f"/api/workspace/study-sets/{study_sets['alpha']['id']}", "DELETE"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(after_alpha["activeWorkspace"], "initial")
+        _, listing = self.request("/api/workspace/uploads")
+        self.assertEqual(listing["uploads"], [])
+        self.assertFalse((self.archives / "voices" / upload_id).exists())
+
+    def test_full_uploaded_zip_library_can_be_deleted(self) -> None:
+        archive_bytes = io.BytesIO()
+        with zipfile.ZipFile(archive_bytes, "w", zipfile.ZIP_DEFLATED) as archive:
+            write_workspace_json(
+                archive,
+                [("Life Contingencies", "./life/output"), ("Loss Models", "./loss/output")],
+            )
+            for name in ("life", "loss"):
+                archive.writestr(
+                    f"{name}/output/qandas/{name}.json",
+                    json.dumps({"title": name.title(), "questions": ["Why?"]}),
+                )
+            archive.writestr("life/output/podcasts/narrator.pt", b"voice")
+
+        _, uploaded = self.upload("actuarial-library.zip", archive_bytes.getvalue())
+        upload_id = uploaded["upload"]["id"]
+        status, deleted = self.request(
+            f"/api/workspace/uploads/{upload_id}", "DELETE"
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(deleted["activeWorkspace"], "initial")
+        self.assertEqual(deleted["deleted"]["workspaceCount"], 2)
+        _, listing = self.request("/api/workspace/uploads")
+        self.assertEqual(listing["uploads"], [])
+        self.assertFalse((self.archives / "voices" / upload_id).exists())
 
     def test_local_folder_selection_endpoint_is_not_available(self) -> None:
         with self.assertRaises(HTTPError) as raised:
@@ -341,6 +541,7 @@ class BackendTest(unittest.TestCase):
         }
         archive_bytes = io.BytesIO()
         with zipfile.ZipFile(archive_bytes, "w", zipfile.ZIP_DEFLATED) as archive:
+            write_workspace_json(archive, [("Imported Podcast", "./lesson/output")])
             archive.writestr("lesson/output/podcasts/imported.json", json.dumps(episode))
             archive.writestr("lesson/output/podcasts/narrator.pt", b"voice")
         self.upload("podcast.zip", archive_bytes.getvalue())

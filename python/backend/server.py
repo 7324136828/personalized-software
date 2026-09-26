@@ -38,7 +38,7 @@ from functools import partial
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Callable
 from urllib.parse import parse_qs, unquote, urlsplit
 
 try:  # imported as ``backend.server`` (tests, package context)
@@ -113,7 +113,7 @@ class ContentState:
         resolved = output_dir.resolve()
         workspace = resolved.parent if resolved.name.casefold() == "output" else None
         self._collection_dir: Path | None = None
-        self._workspaces = {
+        self._initial_workspaces = {
             "initial": {
                 "id": "initial",
                 "name": workspace.name if workspace is not None else resolved.name,
@@ -122,7 +122,38 @@ class ContentState:
                 "databaseWorkspaceId": None,
             }
         }
+        self._workspaces = {key: dict(value) for key, value in self._initial_workspaces.items()}
         self._active_workspace = "initial"
+        self._upload_progress: dict[str, dict[str, Any]] = {}
+
+    def begin_upload(self, identifier: str) -> None:
+        with self._lock:
+            if len(self._upload_progress) >= 100:
+                self._upload_progress.pop(next(iter(self._upload_progress)))
+            self._upload_progress[identifier] = {
+                "id": identifier,
+                "state": "uploading",
+                "percent": 0,
+                "message": "Preparing upload",
+                "currentWorkspace": None,
+                "completedWorkspaces": 0,
+                "totalWorkspaces": 0,
+            }
+
+    def update_upload(self, identifier: str, **changes: Any) -> None:
+        with self._lock:
+            progress = self._upload_progress.get(identifier)
+            if progress is None:
+                return
+            progress.update(changes)
+            progress["percent"] = max(0, min(100, int(progress["percent"])))
+
+    def upload_status(self, identifier: str) -> dict[str, Any]:
+        with self._lock:
+            progress = self._upload_progress.get(identifier)
+            if progress is None:
+                raise FileNotFoundError(identifier)
+            return dict(progress)
 
     @property
     def output_dir(self) -> Path:
@@ -138,7 +169,7 @@ class ContentState:
             value = self._workspaces[self._active_workspace].get("databaseWorkspaceId")
             return str(value) if value is not None else None
 
-    def select_upload(self, upload_id: str) -> None:
+    def select_upload(self, upload_id: str, workspace_key: str | None = None) -> None:
         rows = self.store.list_workspaces(upload_id)
         if not rows:
             raise ValueError("The uploaded workspace could not be loaded")
@@ -152,10 +183,12 @@ class ContentState:
                 "outputDirectory": None,
                 "databaseWorkspaceId": row["id"],
             }
+        if workspace_key is not None and workspace_key not in workspaces:
+            raise ValueError("The requested study set is not in the selected library")
         with self._lock:
             self._collection_dir = None
             self._workspaces = workspaces
-            self._active_workspace = next(iter(workspaces))
+            self._active_workspace = workspace_key or next(iter(workspaces))
 
     def activate_workspace(self, identifier: str) -> Path:
         with self._lock:
@@ -171,6 +204,45 @@ class ContentState:
                 raise ValueError(f"The workspace output folder no longer exists: {output_value}")
             self._active_workspace = identifier
             return Path(output_value) if output_value is not None else self.store.database
+
+    def delete_study_set(self, workspace_id: str) -> dict[str, Any]:
+        deleted = self.store.delete_workspace(workspace_id)
+        with self._lock:
+            loaded_key = next(
+                (
+                    key
+                    for key, workspace in self._workspaces.items()
+                    if workspace.get("databaseWorkspaceId") == workspace_id
+                ),
+                None,
+            )
+            if loaded_key is not None:
+                del self._workspaces[loaded_key]
+                if self._workspaces:
+                    if self._active_workspace == loaded_key:
+                        self._active_workspace = next(iter(self._workspaces))
+                else:
+                    self._collection_dir = None
+                    self._workspaces = {
+                        key: dict(value) for key, value in self._initial_workspaces.items()
+                    }
+                    self._active_workspace = "initial"
+        return deleted
+
+    def delete_study_library(self, upload_id: str) -> dict[str, Any]:
+        deleted = self.store.delete_upload(upload_id)
+        deleted_ids = set(deleted["workspaceIds"])
+        with self._lock:
+            if any(
+                workspace.get("databaseWorkspaceId") in deleted_ids
+                for workspace in self._workspaces.values()
+            ):
+                self._collection_dir = None
+                self._workspaces = {
+                    key: dict(value) for key, value in self._initial_workspaces.items()
+                }
+                self._active_workspace = "initial"
+        return deleted
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -238,27 +310,55 @@ def _archive_member_path(extract_root: Path, member_name: str) -> Path:
     return destination
 
 
-def _find_uploaded_collection(extract_root: Path) -> Path:
-    """Find outputs at the archive root or beneath a single wrapper folder."""
-    candidate = extract_root
-    for _ in range(10):
-        if workspace_directories(candidate):
-            return candidate
-        try:
-            children = [
-                child
-                for child in candidate.iterdir()
-                if child.is_dir() and child.name != "__MACOSX"
-            ]
-        except OSError as error:
-            raise ValueError("The extracted workspace could not be read") from error
-        if len(children) != 1:
-            break
-        candidate = children[0]
-    raise ValueError(
-        "The ZIP must contain a workspace with output, or immediate subfolders "
-        "that contain output folders"
-    )
+def _workspace_manifest(
+    extract_root: Path,
+) -> tuple[Path, list[tuple[str, str, Path, str]]]:
+    """Load the archive's sole workspace.json and resolve its declared outputs."""
+    manifests = [
+        path
+        for path in extract_root.rglob("workspace.json")
+        if "__MACOSX" not in path.parts and path.is_file()
+    ]
+    if not manifests:
+        raise ValueError("The ZIP must contain a workspace.json file")
+    if len(manifests) > 1:
+        raise ValueError("The ZIP must contain exactly one workspace.json file")
+
+    manifest_path = manifests[0]
+    collection = manifest_path.parent
+    try:
+        document = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("workspace.json must contain valid UTF-8 JSON") from error
+    entries = document.get("workspace") if isinstance(document, dict) else None
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("workspace.json must contain a non-empty 'workspace' array")
+
+    rows: list[tuple[str, str, Path, str]] = []
+    seen_paths: set[str] = set()
+    for index, entry in enumerate(entries, start=1):
+        if not isinstance(entry, dict):
+            raise ValueError(f"workspace.json entry {index} must be an object")
+        name = entry.get("name")
+        raw_path = entry.get("path")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(f"workspace.json entry {index} requires a non-empty name")
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            raise ValueError(f"workspace.json entry {index} requires a non-empty path")
+        output = _archive_member_path(collection, raw_path.strip())
+        if output.name.casefold() != "output" or not output.is_dir():
+            raise ValueError(
+                f"workspace.json entry {index} path must reference an existing output folder: "
+                f"{raw_path}"
+            )
+        workspace = output.parent
+        relative = workspace.relative_to(collection).as_posix()
+        key = relative or "."
+        if key in seen_paths:
+            raise ValueError(f"workspace.json contains the path more than once: {raw_path}")
+        seen_paths.add(key)
+        rows.append((key, name.strip(), workspace, relative))
+    return collection, rows
 
 
 def import_workspace_archive(
@@ -267,6 +367,7 @@ def import_workspace_archive(
     filename: str,
     archive_dir: Path,
     store: ContentStore,
+    progress: Callable[[str, int, str | None, int, int], None] | None = None,
 ) -> dict[str, Any]:
     """Safely unpack a ZIP, then persist its learning content in SQLite."""
     original_name = Path(filename).name
@@ -282,6 +383,7 @@ def import_workspace_archive(
     try:
         archive_path = staging / "upload.zip"
         remaining = content_length
+        received = 0
         with archive_path.open("wb") as destination:
             while remaining:
                 chunk = source.read(min(1024 * 1024, remaining))
@@ -289,6 +391,9 @@ def import_workspace_archive(
                     raise ValueError("The ZIP upload ended before all bytes were received")
                 destination.write(chunk)
                 remaining -= len(chunk)
+                received += len(chunk)
+                if progress is not None:
+                    progress("uploading", 2 + int(18 * received / content_length), None, 0, 0)
 
         extract_root = staging / "files"
         extract_root.mkdir()
@@ -300,7 +405,8 @@ def import_workspace_archive(
                     raise ValueError("The ZIP contains too many files")
                 if sum(member.file_size for member in file_members) > MAX_WORKSPACE_EXTRACTED_BYTES:
                     raise ValueError("The ZIP expands beyond the 2 GB limit")
-                for member in members:
+                member_count = max(1, len(members))
+                for member_index, member in enumerate(members, start=1):
                     mode = member.external_attr >> 16
                     if stat.S_ISLNK(mode):
                         raise ValueError(f"ZIP symbolic links are not supported: {member.filename}")
@@ -313,10 +419,20 @@ def import_workspace_archive(
                     target.parent.mkdir(parents=True, exist_ok=True)
                     with archive.open(member) as source_file, target.open("wb") as target_file:
                         shutil.copyfileobj(source_file, target_file, length=1024 * 1024)
+                    if progress is not None:
+                        progress(
+                            "extracting",
+                            20 + int(30 * member_index / member_count),
+                            None,
+                            0,
+                            0,
+                        )
         except (zipfile.BadZipFile, zipfile.LargeZipFile) as error:
             raise ValueError("The uploaded file is not a valid ZIP archive") from error
 
-        collection = _find_uploaded_collection(extract_root)
+        if progress is not None:
+            progress("validating", 52, None, 0, 0)
+        collection, workspaces = _workspace_manifest(extract_root)
         identifier = uuid.uuid4().hex
         metadata = {
             "id": identifier,
@@ -324,9 +440,29 @@ def import_workspace_archive(
             "originalFilename": original_name,
             "uploadedAt": utc_now(),
             "collectionRelative": collection.relative_to(staging).as_posix(),
-            "workspaceCount": len(workspace_directories(collection)),
+            "workspaceCount": len(workspaces),
         }
-        store.import_collection(metadata, collection, KINDS)
+        total_workspaces = len(workspaces)
+
+        def store_progress(completed: int, total: int, name: str) -> None:
+            if progress is not None:
+                progress(
+                    "importing",
+                    55 + int(40 * completed / max(1, total)),
+                    name,
+                    completed,
+                    total,
+                )
+
+        store.import_collection(
+            metadata,
+            collection,
+            KINDS,
+            workspaces=workspaces,
+            progress=store_progress,
+        )
+        if progress is not None:
+            progress("finalizing", 98, workspaces[-1][1], total_workspaces, total_workspaces)
         return metadata
     except (OSError, RuntimeError, sqlite3.Error) as error:
         raise ValueError(f"The workspace ZIP could not be imported: {error}") from error
@@ -842,6 +978,8 @@ class LearningRequestHandler(SimpleHTTPRequestHandler):
 
     def end_headers(self) -> None:
         self.send_header("X-Content-Type-Options", "nosniff")
+        if self.close_connection:
+            self.send_header("Connection", "close")
         super().end_headers()
 
     def _json(self, status: HTTPStatus, value: Any, *, download: str | None = None) -> None:
@@ -860,12 +998,177 @@ class LearningRequestHandler(SimpleHTTPRequestHandler):
 
     def _drain_body(self) -> None:
         """Consume and discard a request body so keep-alive stays in sync."""
+        if self.headers.get("Transfer-Encoding"):
+            # Decoding a rejected streamed body is needless work. Closing the
+            # socket guarantees its bytes cannot be parsed as another request.
+            self.close_connection = True
+            return
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
-            length = 0
+            self.close_connection = True
+            return
         if 0 < length <= MAX_REQUEST_BYTES:
             self.rfile.read(length)
+        elif length > MAX_REQUEST_BYTES:
+            self.close_connection = True
+
+    def _read_chunked_body(
+        self,
+        destination: BinaryIO,
+        maximum: int,
+        progress: Callable[[int], None] | None = None,
+    ) -> int:
+        """Decode an HTTP/1.1 chunked body into ``destination``.
+
+        Vite and other reverse proxies are allowed to replace Content-Length
+        with Transfer-Encoding: chunked while streaming a browser upload.
+        ``BaseHTTPRequestHandler`` does not decode that framing itself.
+        """
+        total = 0
+        while True:
+            line = self.rfile.readline(8193)
+            if len(line) > 8192 or not line.endswith(b"\r\n"):
+                self.close_connection = True
+                raise ValueError("The upload has invalid chunk framing")
+            try:
+                chunk_size = int(line[:-2].split(b";", 1)[0], 16)
+            except ValueError as error:
+                self.close_connection = True
+                raise ValueError("The upload has an invalid chunk size") from error
+            if chunk_size < 0:
+                self.close_connection = True
+                raise ValueError("The upload has an invalid chunk size")
+            if chunk_size == 0:
+                # Consume optional trailers and their terminating blank line.
+                while True:
+                    trailer = self.rfile.readline(8193)
+                    if len(trailer) > 8192 or not trailer.endswith(b"\r\n"):
+                        self.close_connection = True
+                        raise ValueError("The upload has invalid trailer framing")
+                    if trailer == b"\r\n":
+                        return total
+            if total + chunk_size > maximum:
+                # The rest of this request is deliberately not consumed. Close
+                # the connection so those bytes cannot become another request.
+                self.close_connection = True
+                raise ValueError("The uploaded ZIP exceeds the 512 MB limit")
+            chunk = self.rfile.read(chunk_size)
+            if len(chunk) != chunk_size or self.rfile.read(2) != b"\r\n":
+                self.close_connection = True
+                raise ValueError("The ZIP upload ended before all bytes were received")
+            destination.write(chunk)
+            total += chunk_size
+            if progress is not None:
+                progress(total)
+
+    def _receive_workspace_archive(self, filename: str, upload_id: str) -> dict[str, Any]:
+        """Read either a fixed-length or chunked ZIP request and import it."""
+        def report(
+            stage: str,
+            percent: int,
+            current_workspace: str | None,
+            completed: int,
+            total: int,
+        ) -> None:
+            messages = {
+                "uploading": "Receiving workspace ZIP",
+                "extracting": "Extracting workspace files",
+                "validating": "Reading workspace.json",
+                "importing": (
+                    f"Processing study set {completed + 1} of {total}"
+                    if completed < total
+                    else "Finishing study sets"
+                ),
+                "finalizing": "Finalizing study library",
+            }
+            self.content_state.update_upload(
+                upload_id,
+                state=stage,
+                percent=percent,
+                message=messages[stage],
+                currentWorkspace=current_workspace,
+                completedWorkspaces=completed,
+                totalWorkspaces=total,
+            )
+
+        if not Path(filename).name.lower().endswith(".zip"):
+            self._drain_body()
+            raise ValueError("Only .zip workspace archives can be uploaded")
+        raw_length = self.headers.get("Content-Length")
+        raw_expected_length = self.headers.get("X-File-Size")
+        transfer_encoding = self.headers.get("Transfer-Encoding", "")
+        encodings = [
+            part.strip().casefold()
+            for part in transfer_encoding.split(",")
+            if part.strip()
+        ]
+
+        if raw_length is not None and encodings:
+            self.close_connection = True
+            raise ValueError("Upload cannot use both Content-Length and Transfer-Encoding")
+        if raw_length is not None:
+            try:
+                content_length = int(raw_length)
+            except ValueError as error:
+                self.close_connection = True
+                raise ValueError("Invalid Content-Length") from error
+            if content_length < 0:
+                self.close_connection = True
+                raise ValueError("Invalid Content-Length")
+            if content_length > MAX_WORKSPACE_ARCHIVE_BYTES:
+                self.close_connection = True
+            return import_workspace_archive(
+                self.rfile,
+                content_length,
+                filename,
+                self.workspace_archive_dir,
+                self.content_state.store,
+                report,
+            )
+        if encodings != ["chunked"]:
+            self.close_connection = True
+            raise ValueError("Content-Length or chunked Transfer-Encoding is required")
+
+        # Spool large uploads to disk rather than keeping hundreds of MB in RAM.
+        expected_length: int | None = None
+        if raw_expected_length is not None:
+            try:
+                expected_length = int(raw_expected_length)
+            except ValueError as error:
+                self.close_connection = True
+                raise ValueError("Invalid X-File-Size") from error
+            if expected_length <= 0 or expected_length > MAX_WORKSPACE_ARCHIVE_BYTES:
+                self.close_connection = True
+                raise ValueError("Invalid X-File-Size")
+
+        def receive_progress(received: int) -> None:
+            if expected_length is not None:
+                report(
+                    "uploading",
+                    2 + int(18 * min(received, expected_length) / expected_length),
+                    None,
+                    0,
+                    0,
+                )
+
+        with tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024) as body:
+            content_length = self._read_chunked_body(
+                body,
+                MAX_WORKSPACE_ARCHIVE_BYTES,
+                receive_progress,
+            )
+            if expected_length is not None and content_length != expected_length:
+                raise ValueError("The uploaded ZIP size did not match the selected file")
+            body.seek(0)
+            return import_workspace_archive(
+                body,
+                content_length,
+                filename,
+                self.workspace_archive_dir,
+                self.content_state.store,
+                report,
+            )
 
     def _read_json(self) -> Any:
         raw_length = self.headers.get("Content-Length")
@@ -908,6 +1211,21 @@ class LearningRequestHandler(SimpleHTTPRequestHandler):
                 self._json(
                     HTTPStatus.OK,
                     {"uploads": self.content_state.store.list_uploads()},
+                )
+                return
+            progress_match = re.fullmatch(
+                r"/api/workspace/uploads/progress/([0-9a-f]{32})", path
+            )
+            if progress_match:
+                if not self._workspace_web_access_allowed():
+                    self._error(
+                        HTTPStatus.FORBIDDEN,
+                        "Cross-origin workspace access is not allowed",
+                    )
+                    return
+                self._json(
+                    HTTPStatus.OK,
+                    self.content_state.upload_status(progress_match.group(1)),
                 )
                 return
             if path == "/api/content/manifest":
@@ -971,28 +1289,32 @@ class LearningRequestHandler(SimpleHTTPRequestHandler):
                     "Cross-origin workspace access is not allowed",
                 )
                 return
+            upload_id = self.headers.get("X-Upload-ID") or uuid.uuid4().hex
+            if not SESSION_ID.fullmatch(upload_id):
+                self._drain_body()
+                self._error(HTTPStatus.BAD_REQUEST, "Invalid upload progress ID")
+                return
+            self.content_state.begin_upload(upload_id)
             try:
-                raw_length = self.headers.get("Content-Length")
-                if raw_length is None:
-                    raise ValueError("Content-Length is required")
-                try:
-                    content_length = int(raw_length)
-                except ValueError as error:
-                    raise ValueError("Invalid Content-Length") from error
                 filename = unquote(self.headers.get("X-File-Name") or "workspace.zip")
-                upload = import_workspace_archive(
-                    self.rfile,
-                    content_length,
-                    filename,
-                    self.workspace_archive_dir,
-                    self.content_state.store,
-                )
+                upload = self._receive_workspace_archive(filename, upload_id)
                 self.content_state.select_upload(upload["id"])
+                self.content_state.update_upload(
+                    upload_id,
+                    state="done",
+                    percent=100,
+                    message="Study library ready",
+                )
                 self._json(
                     HTTPStatus.CREATED,
                     {**self.content_state.status(), "upload": upload},
                 )
             except ValueError as error:
+                self.content_state.update_upload(
+                    upload_id,
+                    state="error",
+                    message=str(error),
+                )
                 self._error(HTTPStatus.BAD_REQUEST, str(error))
             return
         if path == "/api/workspace/activate":
@@ -1028,7 +1350,12 @@ class LearningRequestHandler(SimpleHTTPRequestHandler):
                     raise ValueError("uploadId must be a non-empty string")
                 if not SESSION_ID.fullmatch(identifier):
                     raise ValueError("Invalid uploaded workspace ID")
-                self.content_state.select_upload(identifier)
+                workspace_key = payload.get("workspaceId")
+                if workspace_key is not None and (
+                    not isinstance(workspace_key, str) or not workspace_key
+                ):
+                    raise ValueError("workspaceId must be a non-empty string")
+                self.content_state.select_upload(identifier, workspace_key)
                 self._json(HTTPStatus.OK, self.content_state.status())
             except ValueError as error:
                 self._error(HTTPStatus.BAD_REQUEST, str(error))
@@ -1056,6 +1383,36 @@ class LearningRequestHandler(SimpleHTTPRequestHandler):
             self._json(HTTPStatus.CREATED, create_session(self.response_dir, self._read_json()))
         except ValueError as error:
             self._error(HTTPStatus.BAD_REQUEST, str(error))
+
+    def do_DELETE(self) -> None:  # noqa: N802 - stdlib handler API
+        path = unquote(urlsplit(self.path).path)
+        study_set_match = re.fullmatch(
+            r"/api/workspace/study-sets/([0-9a-f]{32})", path
+        )
+        library_match = re.fullmatch(r"/api/workspace/uploads/([0-9a-f]{32})", path)
+        if not study_set_match and not library_match:
+            self._error(HTTPStatus.NOT_FOUND, "API endpoint not found")
+            return
+        if not self._workspace_web_access_allowed():
+            self._drain_body()
+            self._error(
+                HTTPStatus.FORBIDDEN,
+                "Cross-origin workspace access is not allowed",
+            )
+            return
+        self._drain_body()
+        try:
+            deleted = (
+                self.content_state.delete_study_set(study_set_match.group(1))
+                if study_set_match
+                else self.content_state.delete_study_library(library_match.group(1))
+            )
+            self._json(
+                HTTPStatus.OK,
+                {**self.content_state.status(), "deleted": deleted},
+            )
+        except ValueError as error:
+            self._error(HTTPStatus.NOT_FOUND, str(error))
 
     def do_PUT(self) -> None:  # noqa: N802 - stdlib handler API
         path = unquote(urlsplit(self.path).path)
